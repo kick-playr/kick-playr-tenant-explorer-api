@@ -362,3 +362,10 @@ test('revocation during a provider response prevents saved progress or operation
   assert.equal(f.state.onboarding, undefined);
   assert.equal(f.publishes(), 0);
 });
+
+test('MongoDB configuration changes during infrastructure checks invalidate their receipt',async()=>{
+ const f=fixture();
+ const service=new OnboardingService(f.repo,[binding],f.identity,f.runtime,{ready:true,send:async()=>{},verify:async()=>{f.state.revision++;return true;}});
+ await assert.rejects(service.verifyProvisioning(s,{issuer:'https://platform.example',subject:'operator'}));
+ assert.equal(f.state.onboarding?.provisioning,undefined);
+});

@@ -229,7 +229,7 @@ export class OnboardingService {
       );
     const revision = await this.repository.transact(
       s,
-      async (tx) => tx.tenant.definition.configRevision,
+      async (tx) => ({config:tx.tenant.definition.configRevision,setup:tx.state.revision}),
     );
     const result = await this.runtime.request(
       s,
@@ -249,10 +249,10 @@ export class OnboardingService {
     if(emailReady!==true || (actor.expiresAt!==undefined && actor.expiresAt<=Date.now()))throw new ServiceUnavailableException('Plattform-Mailprüfung oder Sitzung nicht bestätigt');
     checks.email = 'verified';
     return this.repository.transact(s, async (tx) => {
-      if (tx.tenant.definition.configRevision !== revision)
+      if (tx.tenant.definition.configRevision !== revision.config || tx.state.revision !== revision.setup)
         throw new ConflictException('Vereinskonfiguration wurde geändert');
       this.state(tx).provisioning = {
-        configRevision: revision,
+        configRevision: revision.config,
         verifiedAt: new Date().toISOString(),
         checks,
       };

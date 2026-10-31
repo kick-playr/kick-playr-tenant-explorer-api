@@ -1,4 +1,4 @@
-import { createDecipheriv } from 'node:crypto';
+import { decodeRuntimeEnvelope } from './runtime-configuration.js';
 import type { MongoClient } from 'mongodb';
 import { z } from 'zod';
 import { KeyFileRegistry, runtimeKeyBindings } from './key-files.js';
@@ -7,7 +7,6 @@ import { ClubRuntime, type RuntimeBinding } from './club-runtime.js';
 import { trustedClubRealms, type PlatformAuthOptions } from './auth.js';
 
 const fail = () => Error('Explorer database configuration unavailable');
-const MAX_BYTES = 2 * 1024 * 1024;
 export function validRealmHost(value: unknown): value is string {
   if (
     typeof value !== 'string' ||
@@ -101,24 +100,12 @@ export interface ExplorerDatabaseConfiguration {
   >;
   platformHosts: string[];
 }
-function base64(value: unknown, max: number): Buffer {
-  if (
-    typeof value !== 'string' ||
-    !value ||
-    value.length > Math.ceil(max / 3) * 4
-  )
-    throw fail();
-  const bytes = Buffer.from(value, 'base64');
-  if (bytes.length > max || bytes.toString('base64') !== value) throw fail();
-  return bytes;
-}
 /** Independent codec for the shared platform envelope; no sibling source imports. */
 export async function loadExplorerConfiguration(
   client: Pick<MongoClient, 'db'>,
   database: string,
   key: Buffer,
 ): Promise<ExplorerDatabaseConfiguration> {
-  let plain: Buffer | undefined;
   try {
     if (
       !Buffer.isBuffer(key) ||
@@ -140,33 +127,7 @@ export async function loadExplorerConfiguration(
         readPreference: 'primary',
         maxTimeMS: 5000,
       });
-    if (
-      !row ||
-      Object.keys(row).sort().join() !== '_id,ciphertext,nonce,tag,version' ||
-      row._id !== 'runtime:development' ||
-      row.version !== 1
-    )
-      throw fail();
-    const nonce = base64(row.nonce, 12),
-      tag = base64(row.tag, 16),
-      ciphertext = base64(row.ciphertext, MAX_BYTES);
-    if (nonce.length !== 12 || tag.length !== 16) throw fail();
-    const decipher = createDecipheriv('aes-256-gcm', key, nonce, {
-      authTagLength: 16,
-    });
-    decipher.setAAD(
-      Buffer.from(
-        JSON.stringify([
-          'kick-playr:tenant-workflow-configuration',
-          database,
-          1,
-        ]),
-      ),
-    );
-    decipher.setAuthTag(tag);
-    plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-    if (plain.length > MAX_BYTES) throw fail();
-    const payload: unknown = JSON.parse(plain.toString('utf8'));
+    const payload = decodeRuntimeEnvelope(row, key, database);
     if (
       !payload ||
       typeof payload !== 'object' ||
@@ -197,7 +158,5 @@ export async function loadExplorerConfiguration(
     }) as ExplorerDatabaseConfiguration;
   } catch {
     throw fail();
-  } finally {
-    plain?.fill(0);
   }
 }
