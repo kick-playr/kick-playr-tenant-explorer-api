@@ -26,7 +26,8 @@
     "mongodb": "^7.8.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
-    "zod": "^4.6.7"
+    "zod": "^4.6.7",
+    "nodemailer": "^9.1.1"
   },
   "devDependencies": {
     "@nestjs/testing": "^12.3.2",

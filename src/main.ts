@@ -8,6 +8,13 @@ import { ClubRuntime } from './club-runtime.js';
 import { loadExplorerConfiguration } from './database-config.js';
 import { PublicRealmDirectory } from './public-realms.js';
 
+import { InvitationService } from './invitations/service.js';
+import { MongoInvitationRepository } from './invitations/repository.js';
+import {
+  ClerkInvitationIdentity,
+  invitationBindings,
+} from './invitations/identity.js';
+import { invitationSender } from './invitations/delivery.js';
 function required(name: string) {
   const value = process.env[name];
   if (!value) throw new Error(`Required environment variable: ${name}`);
@@ -49,6 +56,7 @@ async function bootstrap() {
   } finally {
     rootKey.fill(0);
   }
+  const vault = new CredentialVault(Buffer.from(key, 'hex'));
   let app: Awaited<ReturnType<typeof createApp>> | undefined;
   try {
     app = await createApp({
@@ -56,7 +64,17 @@ async function bootstrap() {
       keyFiles: new KeyFileRegistry(config.keyBindings.bindings, database),
       publicRealms: new PublicRealmDirectory(config),
       repository: new MongoRepository(client, database),
-      vault: new CredentialVault(Buffer.from(key, 'hex')),
+      vault,
+      invitations: new InvitationService(
+        new MongoInvitationRepository(client, database),
+        invitationBindings(
+          process.env.EXPLORER_INVITATION_BINDINGS_JSON,
+          process.env,
+        ),
+        new ClerkInvitationIdentity(),
+        vault,
+        invitationSender(process.env),
+      ),
       auth: {
         clubRealms: config.clubRealms,
         issuer: config.issuer,

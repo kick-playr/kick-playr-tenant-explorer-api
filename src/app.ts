@@ -40,6 +40,13 @@ import { ClubRuntime } from './club-runtime.js';
 import { ClubController, ExplorerAccessController } from './club.controller.js';
 import { PublicRealmDirectory } from './public-realms.js';
 
+import { InvitationService } from './invitations/service.js';
+import {
+  PlatformInvitationsController,
+  ClubInvitationsController,
+  AcceptanceController,
+  InvitationPlatformGuard,
+} from './invitations/controller.js';
 @Catch()
 class SafeExceptionFilter implements ExceptionFilter {
   catch(error: unknown, host: ArgumentsHost) {
@@ -89,9 +96,13 @@ class HealthController {
 }
 @Controller('public')
 class PublicRealmController {
-  constructor(@Inject(PublicRealmDirectory) private readonly realms:PublicRealmDirectory) {}
+  constructor(
+    @Inject(PublicRealmDirectory) private readonly realms: PublicRealmDirectory,
+  ) {}
   @Get('realm')
-  realm(@Query() query:Record<string,unknown>) {return this.realms.resolve(query);}
+  realm(@Query() query: Record<string, unknown>) {
+    return this.realms.resolve(query);
+  }
 }
 
 export interface AppOptions {
@@ -102,6 +113,7 @@ export interface AppOptions {
   keyFiles?: KeyFileRegistry;
   clubRuntime?: ClubRuntime;
   publicRealms?: PublicRealmDirectory;
+  invitations?: InvitationService;
 }
 export async function createApp(
   options: AppOptions,
@@ -114,11 +126,44 @@ export async function createApp(
       ClubController,
       ExplorerAccessController,
       PublicRealmController,
+      PlatformInvitationsController,
+      ClubInvitationsController,
+      AcceptanceController,
     ],
     providers: [
       { provide: AUTH_OPTIONS, useValue: options.auth },
-      {provide:PublicRealmDirectory,useValue:options.publicRealms??new PublicRealmDirectory()},
+      {
+        provide: PublicRealmDirectory,
+        useValue: options.publicRealms ?? new PublicRealmDirectory(),
+      },
       PlatformGuard,
+      InvitationPlatformGuard,
+      {
+        provide: InvitationService,
+        useValue:
+          options.invitations ??
+          new Proxy(
+            {},
+            {
+              get: (_target, key) =>
+                [
+                  'create',
+                  'list',
+                  'resend',
+                  'revoke',
+                  'revokeAccess',
+                  'deliver',
+                  'preview',
+                  'accept',
+                  'status',
+                ].includes(String(key))
+                  ? () => {
+                      throw new HttpException('Invitations unavailable', 503);
+                    }
+                  : undefined,
+            },
+          ),
+      },
       ExplorerSessionGuard,
       {
         provide: ClubAccess,
@@ -159,6 +204,7 @@ export async function createApp(
   app.use(helmet());
   app.use((_req: unknown, res: Response, next: () => void) => {
     res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Referrer-Policy', 'no-referrer');
     next();
   });
   app.use(json({ limit: '64kb' }));
@@ -170,7 +216,7 @@ export async function createApp(
       .setDescription(
         'Platform routes require an allowlisted platform Clerk session. Club routes require exact active tenant administrator grants and use the existing authenticated club runtime and encrypted storage.',
       )
-      .setVersion('0.1.0')
+      .setVersion('0.1.1')
       .addBearerAuth()
       .build(),
   );
