@@ -8,6 +8,17 @@ import type { Repository, Transaction } from '../src/repository.js';
 
 // Transactional storage double. No network or Mongo process is started by tests.
 export class MemoryRepository implements Repository {
+  async clubDefinitions(issuer: string, subject: string) {
+    return structuredClone(
+      [...this.rows.values()]
+        .filter((a) =>
+          a.authority?.users.some(
+            (g) => g.issuer === issuer && g.subject === subject,
+          ),
+        )
+        .map((a) => a.definition),
+    );
+  }
   rows = new Map<string, Aggregate>();
   events: AuditEvent[] = [];
   private queue = Promise.resolve();

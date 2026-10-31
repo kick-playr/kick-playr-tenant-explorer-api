@@ -1,8 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, chmod, symlink, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { KeyFileRegistry } from '../src/key-files.js';
 
@@ -52,191 +49,73 @@ test('environment bindings expose only variable names and the original key finge
   assert.equal(missing.files[1]?.status, 'missing');
 });
 
-test('cloud bindings load from JSON config without requiring a local metadata file', async () => {
-  const env = {
-    EXPLORER_KEY_BINDINGS_JSON: JSON.stringify({
-      version: 1,
-      bindings: [
-        {
-          tenantId: 'club',
-          environment: 'development',
-          controlDatabase: 'control',
-          keyReference: 'local:club:key',
-          version: 'v1',
-          profile: 'local',
-          variables: {
-            wrapping: 'CLUB_WRAPPING_KEY_V1',
-            index: 'CLUB_INDEX_KEY',
-            control: 'CLUB_CONTROL_KEY',
-          },
-        },
-      ],
-    }),
-    CLUB_WRAPPING_KEY_V1: Buffer.alloc(32, 1).toString('base64'),
-    CLUB_INDEX_KEY: Buffer.alloc(32, 2).toString('base64'),
-    CLUB_CONTROL_KEY: Buffer.alloc(32, 3).toString('base64'),
+test('legacy configuration file and environment JSON loading always fail closed', async () => {
+  const before = process.env.EXPLORER_KEY_BINDINGS_JSON;
+  process.env.EXPLORER_KEY_BINDINGS_JSON = JSON.stringify({
+    version: 1,
+    bindings: [],
+  });
+  try {
+    await assert.rejects(
+      KeyFileRegistry.load(),
+      /encrypted database configuration/,
+    );
+  } finally {
+    if (before === undefined) delete process.env.EXPLORER_KEY_BINDINGS_JSON;
+    else process.env.EXPLORER_KEY_BINDINGS_JSON = before;
+  }
+});
+test('database bindings reject file paths and public key variables', () => {
+  const binding = {
+    tenantId: 'club',
+    environment: 'development',
+    controlDatabase: 'control',
+    keyReference: 'club:key',
+    version: 'v1',
+    profile: 'local',
   };
-  const registry = await KeyFileRegistry.load(
-    '/does/not/exist',
-    'control',
-    env,
+  assert.throws(
+    () =>
+      new KeyFileRegistry(
+        [
+          {
+            ...binding,
+            files: {
+              wrapping: '/secret',
+              index: '/secret',
+              control: '/secret',
+            },
+          },
+        ],
+        'control',
+      ),
   );
-  assert.equal(
-    (
-      await registry.describe({
-        id: 'club',
-        environment: 'development',
-        secretReferences: { key: 'local:club:key' },
-      })
-    ).status,
-    'connected',
+  assert.throws(
+    () =>
+      new KeyFileRegistry(
+        [
+          {
+            ...binding,
+            variables: {
+              wrapping: 'NEXT_PUBLIC_WRAPPING_KEY_V1',
+              index: 'CLUB_INDEX_KEY',
+              control: 'CLUB_CONTROL_KEY',
+            },
+          },
+        ],
+        'control',
+      ),
   );
-  await assert.rejects(
-    KeyFileRegistry.load(undefined, 'control', {
-      EXPLORER_KEY_BINDINGS_JSON: 'invalid JSON',
-    }),
-    /bindings are unavailable/,
+  const configured = {
+    ...binding,
+    variables: {
+      wrapping: 'CLUB_WRAPPING_KEY_V1',
+      index: 'CLUB_INDEX_KEY',
+      control: 'CLUB_CONTROL_KEY',
+    },
+  };
+  assert.throws(
+    () => new KeyFileRegistry([configured, configured], 'control'),
+    /Duplicate/,
   );
-});
-
-test('connects exact tenant/database/reference bindings without exposing key bytes', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'explorer-keys-'));
-  try {
-    const paths = {
-      wrapping: join(dir, 'v1.key'),
-      index: join(dir, 'index.key'),
-      control: join(dir, 'control-v1.key'),
-    };
-    for (const [i, path] of Object.values(paths).entries())
-      await writeFile(path, Buffer.alloc(32, i + 1), { mode: 0o600 });
-    const registry = new KeyFileRegistry(
-      [
-        {
-          tenantId: 'fcrww',
-          environment: 'development',
-          controlDatabase: 'app-local-control-kick-playr-ch',
-          keyReference: 'real-development:fcrww:key',
-          version: 'v1',
-          profile: 'real-development',
-          files: paths,
-        },
-      ],
-      'app-local-control-kick-playr-ch',
-    );
-    const result = await registry.describe({
-      id: 'fcrww',
-      environment: 'development',
-      secretReferences: { key: 'real-development:fcrww:key' },
-    });
-    assert.equal(result.status, 'connected');
-    assert.equal(result.files.length, 3);
-    assert.equal(
-      result.files[0]?.fingerprint,
-      createHash('sha256').update(Buffer.alloc(32, 1)).digest('hex'),
-    );
-    assert.ok(
-      !JSON.stringify(result).includes(Buffer.alloc(32, 1).toString('base64')),
-    );
-    assert.equal(
-      (
-        await registry.describe({
-          id: 'fcuster',
-          environment: 'development',
-          secretReferences: { key: 'real-development:fcrww:key' },
-        })
-      ).status,
-      'unbound',
-    );
-    assert.equal(
-      (
-        await registry.describe({
-          id: 'fcrww',
-          environment: 'production',
-          secretReferences: { key: 'real-development:fcrww:key' },
-        })
-      ).status,
-      'unbound',
-    );
-    assert.equal(
-      (
-        await registry.describe({
-          id: 'fcrww',
-          environment: 'development',
-          secretReferences: { key: 'workflow-local:fcrww:key' },
-        })
-      ).status,
-      'unbound',
-    );
-    const foreign = new KeyFileRegistry(
-      [
-        {
-          tenantId: 'fcrww',
-          environment: 'development',
-          controlDatabase: 'different-control',
-          keyReference: 'real-development:fcrww:key',
-          version: 'v1',
-          profile: 'real-development',
-          files: paths,
-        },
-      ],
-      'app-local-control-kick-playr-ch',
-    );
-    assert.equal(
-      (
-        await foreign.describe({
-          id: 'fcrww',
-          environment: 'development',
-          secretReferences: { key: 'real-development:fcrww:key' },
-        })
-      ).status,
-      'unbound',
-    );
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('reports invalid, missing and insecure files without reading unrelated paths', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'explorer-keys-'));
-  try {
-    const wrapping = join(dir, 'v1.key'),
-      index = join(dir, 'index.key'),
-      control = join(dir, 'control.key');
-    await writeFile(wrapping, Buffer.alloc(31), { mode: 0o600 });
-    await writeFile(index, Buffer.alloc(32), { mode: 0o600 });
-    await chmod(index, 0o644);
-    const registry = new KeyFileRegistry(
-      [
-        {
-          tenantId: 'club',
-          environment: 'development',
-          controlDatabase: 'control',
-          keyReference: 'local:club:key',
-          version: 'v1',
-          profile: 'local',
-          files: { wrapping, index, control },
-        },
-      ],
-      'control',
-    );
-    const tenant = {
-      id: 'club',
-      environment: 'development',
-      secretReferences: { key: 'local:club:key' },
-    };
-    const result = await registry.describe(tenant);
-    assert.equal(result.status, 'unavailable');
-    assert.deepEqual(
-      result.files.map((file) => file.status),
-      ['invalid', 'insecure', 'missing'],
-    );
-    assert.ok(result.files.every((file) => !file.fingerprint));
-    await symlink(index, control);
-    assert.equal(
-      (await registry.describe(tenant)).files[2]?.status,
-      'insecure',
-    );
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
 });
