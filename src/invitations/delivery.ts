@@ -16,6 +16,7 @@ export function invitationSender(
     throw Error('Invitation sender requires SMTPS');
   const mail = createRequire(import.meta.url)('nodemailer') as {
     createTransport: (o: object) => {
+      verify: () => Promise<unknown>;
       sendMail: (
         m: object,
       ) => Promise<{ accepted?: string[]; rejected?: string[] }>;
@@ -38,6 +39,7 @@ export function invitationSender(
     throw Error('Invalid invitation sender');
   return {
     ready: true,
+    verify: () => transport.verify(),
     async send(m) {
       const result = await transport.sendMail({
         from,

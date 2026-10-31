@@ -13,6 +13,17 @@ const binding = {
   authorizedParties: ['https://club.example'],
   secretKey: 'test-secret',
 };
+test('invitation backend secret references cannot use browser-public variable names', () => {
+  const { secretKey, ...publicBinding } = binding;
+  assert.throws(() =>
+    invitationBindings(
+      JSON.stringify([
+        { ...publicBinding, secretKeyEnv: 'NEXT_PUBLIC_CLUB_SECRET' },
+      ]),
+      { NEXT_PUBLIC_CLUB_SECRET: secretKey },
+    ),
+  );
+});
 test('setup verification passes exact expected JWT constraints and checks live session/user', async () => {
   const claims = {
     iss: binding.issuer,

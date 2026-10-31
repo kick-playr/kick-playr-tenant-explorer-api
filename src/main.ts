@@ -15,6 +15,8 @@ import {
   invitationBindings,
 } from './invitations/identity.js';
 import { invitationSender } from './invitations/delivery.js';
+import { OnboardingService } from './onboarding/service.js';
+import { SetupRuntime } from './onboarding/runtime.js';
 function required(name: string) {
   const value = process.env[name];
   if (!value) throw new Error(`Required environment variable: ${name}`);
@@ -57,6 +59,23 @@ async function bootstrap() {
     rootKey.fill(0);
   }
   const vault = new CredentialVault(Buffer.from(key, 'hex'));
+  const invitationRepository = new MongoInvitationRepository(client, database),
+    identity = new ClerkInvitationIdentity(),
+    bindings = invitationBindings(
+      process.env.EXPLORER_INVITATION_BINDINGS_JSON,
+      process.env,
+    );
+  const sender = invitationSender(process.env);
+  const onboarding = new OnboardingService(
+    invitationRepository,
+    bindings,
+    identity,
+    new SetupRuntime(
+      config.setupRuntimes??config.clubRuntimes,
+      process.env.MANAGER_SETUP_CONTROL_KEY,
+    ),
+    sender,
+  );
   let app: Awaited<ReturnType<typeof createApp>> | undefined;
   try {
     app = await createApp({
@@ -65,15 +84,14 @@ async function bootstrap() {
       publicRealms: new PublicRealmDirectory(config),
       repository: new MongoRepository(client, database),
       vault,
+      onboarding,
       invitations: new InvitationService(
-        new MongoInvitationRepository(client, database),
-        invitationBindings(
-          process.env.EXPLORER_INVITATION_BINDINGS_JSON,
-          process.env,
-        ),
-        new ClerkInvitationIdentity(),
+        invitationRepository,
+        bindings,
+        identity,
         vault,
-        invitationSender(process.env),
+        sender,
+        (scope) => onboarding.assertProvisioned(scope),
       ),
       auth: {
         clubRealms: config.clubRealms,

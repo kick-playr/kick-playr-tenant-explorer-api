@@ -41,6 +41,11 @@ import { ClubController, ExplorerAccessController } from './club.controller.js';
 import { PublicRealmDirectory } from './public-realms.js';
 
 import { InvitationService } from './invitations/service.js';
+import { OnboardingService } from './onboarding/service.js';
+import {
+  OnboardingController,
+  ProvisioningController,
+} from './onboarding/controller.js';
 import {
   PlatformInvitationsController,
   ClubInvitationsController,
@@ -114,6 +119,7 @@ export interface AppOptions {
   clubRuntime?: ClubRuntime;
   publicRealms?: PublicRealmDirectory;
   invitations?: InvitationService;
+  onboarding?: OnboardingService;
 }
 export async function createApp(
   options: AppOptions,
@@ -129,6 +135,8 @@ export async function createApp(
       PlatformInvitationsController,
       ClubInvitationsController,
       AcceptanceController,
+      OnboardingController,
+      ProvisioningController,
     ],
     providers: [
       { provide: AUTH_OPTIONS, useValue: options.auth },
@@ -138,6 +146,32 @@ export async function createApp(
       },
       PlatformGuard,
       InvitationPlatformGuard,
+      {
+        provide: OnboardingService,
+        useValue:
+          options.onboarding ??
+          new Proxy(
+            {},
+            {
+              get: (_target, key) =>
+                [
+                  'status',
+                  'run',
+                  'complete',
+                  'confirm',
+                  'reviews',
+                  'reviewContact',
+                  'provisioning',
+                  'saveProvisioning',
+                  'verifyProvisioning',
+                ].includes(String(key))
+                  ? () => {
+                      throw new HttpException('Setup unavailable', 503);
+                    }
+                  : undefined,
+            },
+          ),
+      },
       {
         provide: InvitationService,
         useValue:

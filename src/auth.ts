@@ -71,6 +71,7 @@ export interface PlatformAuthOptions {
 export const AUTH_OPTIONS = Symbol('PLATFORM_AUTH_OPTIONS');
 export interface PlatformRequest extends Request {
   platformSubject: string;
+  platformExpiresAt?: number;
   explorerSession: ExplorerSession;
 }
 export interface ExplorerSession {

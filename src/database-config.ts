@@ -2,6 +2,7 @@ import { createDecipheriv } from 'node:crypto';
 import type { MongoClient } from 'mongodb';
 import { z } from 'zod';
 import { KeyFileRegistry } from './key-files.js';
+import { SetupRuntime } from './onboarding/runtime.js';
 import { ClubRuntime, type RuntimeBinding } from './club-runtime.js';
 import { trustedClubRealms, type PlatformAuthOptions } from './auth.js';
 
@@ -79,6 +80,7 @@ const explorerSchema = z.strictObject({
     bindings: z.array(z.unknown()).max(256),
   }),
   clubRuntimes: z.array(z.unknown()).max(100),
+  setupRuntimes: z.array(z.unknown()).max(100).optional(),
   clubRealms: z.array(z.unknown()).max(100),
   frontendHosts: z
     .record(hostSchema, frontendHostSchema)
@@ -91,6 +93,7 @@ export interface ExplorerDatabaseConfiguration {
   adminSubjects: string[];
   keyBindings: { version: 1; bindings: unknown[] };
   clubRuntimes: RuntimeBinding[];
+  setupRuntimes?: {environment:string;tenantId:string;origin:string}[];
   clubRealms: NonNullable<PlatformAuthOptions['clubRealms']>;
   frontendHosts: Record<
     string,
@@ -178,6 +181,7 @@ export async function loadExplorerConfiguration(
     // origin and issuer checks before any application services are constructed.
     new KeyFileRegistry(config.keyBindings.bindings, database);
     new ClubRuntime(config.clubRuntimes);
+    if(config.setupRuntimes)new SetupRuntime(config.setupRuntimes);
     const realms = trustedClubRealms(config.clubRealms, config.issuer);
     if (
       new Set(config.platformHosts).size !== config.platformHosts.length ||
