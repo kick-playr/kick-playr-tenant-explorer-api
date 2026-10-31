@@ -1,7 +1,7 @@
 import { createDecipheriv } from 'node:crypto';
 import type { MongoClient } from 'mongodb';
 import { z } from 'zod';
-import { KeyFileRegistry } from './key-files.js';
+import { KeyFileRegistry, runtimeKeyBindings } from './key-files.js';
 import { SetupRuntime } from './onboarding/runtime.js';
 import { ClubRuntime, type RuntimeBinding } from './club-runtime.js';
 import { trustedClubRealms, type PlatformAuthOptions } from './auth.js';
@@ -177,6 +177,7 @@ export async function loadExplorerConfiguration(
     )
       throw fail();
     const config = explorerSchema.parse(payload.explorer);
+    config.keyBindings.bindings = runtimeKeyBindings(payload, database, config.keyBindings.bindings);
     // These constructors preserve the existing tenant key-reference, destination,
     // origin and issuer checks before any application services are constructed.
     new KeyFileRegistry(config.keyBindings.bindings, database);

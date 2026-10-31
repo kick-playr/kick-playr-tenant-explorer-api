@@ -130,3 +130,71 @@ export class KeyFileRegistry {
     }
   }
 }
+
+/** Derive display/verification metadata from the authenticated encrypted runtime
+ * configuration. Environment-variable discovery never creates tenant bindings. */
+export function runtimeKeyBindings(
+  payload: unknown,
+  database: string,
+  explicit: unknown[],
+): unknown[] {
+  const existing = configSchema.parse({
+    version: 1,
+    bindings: explicit,
+  }).bindings;
+  const manifest = payload as { profile?: unknown; tenants?: unknown };
+  // Compatibility for explorer-only envelopes that predate runtime metadata.
+  if (manifest.tenants === undefined) return existing;
+  if (
+    !['workflow-real', 'workflow-local'].includes(manifest.profile as string) ||
+    !Array.isArray(manifest.tenants) ||
+    !manifest.tenants.length ||
+    manifest.tenants.length > 32
+  )
+    throw new Error('Invalid runtime key bindings');
+  const seen = new Set<string>();
+  for (const row of manifest.tenants) {
+    const tenantId = identifier.parse(row?.id);
+    if (seen.has(tenantId)) throw new Error('Duplicate runtime tenant binding');
+    seen.add(tenantId);
+    const variable = (ref: unknown, suffix: string) => {
+      if (
+        typeof ref !== 'string' ||
+        !ref.startsWith('env:') ||
+        !ref.endsWith(suffix)
+      )
+        throw new Error('Invalid runtime key reference');
+      return variableSchema.parse(ref.slice(4));
+    };
+    const binding = bindingSchema.parse({
+      tenantId,
+      environment: 'development',
+      controlDatabase: database,
+      keyReference: `workflow-local:${tenantId}:key`,
+      version: 'v1',
+      profile: manifest.profile,
+      variables: {
+        wrapping: variable(row.wrappingKeyRef, 'WRAPPING_KEY_V1'),
+        index: variable(row.indexKeyRef, 'INDEX_KEY'),
+        control: variable(row.controlKeyRef, 'CONTROL_KEY'),
+      },
+    });
+    const prior = existing.find(
+      (b) =>
+        b.tenantId === tenantId &&
+        b.environment === 'development' &&
+        b.controlDatabase === database &&
+        b.keyReference === binding.keyReference,
+    );
+    if (prior) {
+      if (
+        (['wrapping', 'index', 'control'] as const).some(
+          (kind) => prior.variables[kind] !== binding.variables[kind],
+        )
+      )
+        throw new Error('Conflicting runtime key bindings');
+      existing.splice(existing.indexOf(prior), 1, binding);
+    } else existing.push(binding);
+  }
+  return existing;
+}
