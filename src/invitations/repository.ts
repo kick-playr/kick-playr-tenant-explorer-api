@@ -1,5 +1,6 @@
 import { ForbiddenException } from '@nestjs/common';
 import type { MongoClient } from 'mongodb';
+import { publishManagerRuntime } from '../onboarding/publisher.js';
 import type {
   InvitationRepository,
   InvitationState,
@@ -74,6 +75,16 @@ export class MongoInvitationRepository implements InvitationRepository {
               >,
             },
             state,
+            publishRuntime: (input) =>
+              publishManagerRuntime(
+                this.client,
+                this.database,
+                session,
+                definition,
+                authority,
+                state,
+                input,
+              ),
             revokeRuntime: async (issuer, subject) => {
               if (
                 !Number.isSafeInteger(authority.authorityRevision) ||

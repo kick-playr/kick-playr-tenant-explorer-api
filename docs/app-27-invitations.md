@@ -1,5 +1,7 @@
 # APP-27 invitation boundary
 
+APP-26 follow-up implementation and its current prerequisites are documented in [manager onboarding](app-26-onboarding.md). The APP-27-only boundary below records the original implementation.
+
 Scope approved in Jira comments 10035–10038. This feature delivers invitation management, verified acceptance, a separate setup principal and a blocked APP-26 handoff. It never inserts incomplete runtime authority users, activates tenants or exposes a completion bypass. Existing runtime positive `contactId` validation is unchanged.
 
 Configure `EXPLORER_INVITATION_BINDINGS_JSON` with exact environment/tenant, expected Clerk issuer, APP origin, audience, authorized origins and secret-key environment-variable name. Configure the existing platform Clerk secret too: new invitation routes additionally check live operator session/user. Configure a dedicated SMTPS invitation sender and from-address; absent sender prevents creation. No environment values or real invitations were installed by this change.

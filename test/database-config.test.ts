@@ -80,6 +80,12 @@ function client(document: unknown) {
     },
   };
 }
+test('setup destination is separately pinned so first-owner setup does not depend on operational grants',async()=>{
+  const setupRuntimes=[{environment:'development',tenantId:'club',origin:'http://localhost:3000'}];
+  const result=await loadExplorerConfiguration(client(row({version:2,explorer:{...explorer(),setupRuntimes}})) as never,database,key);
+  assert.deepEqual(result.setupRuntimes,setupRuntimes);
+  await assert.rejects(loadExplorerConfiguration(client(row({version:2,explorer:{...explorer(),setupRuntimes:[{environment:'production',tenantId:'club',origin:'http://untrusted.example'}]}})) as never,database,key));
+});
 test('loads only validated Explorer DB projection and never falls back to environment JSON', async () => {
   const previous = process.env.EXPLORER_CLUB_RUNTIMES_JSON;
   process.env.EXPLORER_CLUB_RUNTIMES_JSON = 'invalid legacy config';

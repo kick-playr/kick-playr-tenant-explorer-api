@@ -16,7 +16,9 @@ const bindingSchema = z.strictObject({
   origin: z.string().url(),
   audience: z.string().min(1).max(256),
   authorizedParties: z.array(z.string().url()).min(1).max(16),
-  secretKeyEnv: z.string().regex(/^[A-Z][A-Z0-9_]{1,100}$/),
+  secretKeyEnv: z
+    .string()
+    .regex(/^(?!NEXT_PUBLIC_|VITE_|PUBLIC_)[A-Z][A-Z0-9_]{1,100}$/),
 });
 export function invitationBindings(
   raw: string | undefined,
@@ -50,7 +52,7 @@ export function invitationBindings(
     }
     if (!r.authorizedParties.includes(r.origin) || !env[secretKeyEnv])
       throw Error('Invitation identity configuration unavailable');
-    return { ...r, secretKey: env[secretKeyEnv]! };
+    return { ...r, secretKeyEnv, secretKey: env[secretKeyEnv]! };
   });
 }
 /** Separate setup admission: no existing tenant membership required, no runtime grants issued. */
@@ -99,6 +101,7 @@ export class ClerkInvitationIdentity implements IdentityPort {
         issuer: b.issuer,
         subject: user.id,
         sessionId: session.id,
+        expiresAt: Math.floor(claims.exp * 1000),
         emails: user.emailAddresses
           .filter((e) => e.verification?.status === 'verified')
           .map((e) => e.emailAddress),

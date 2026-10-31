@@ -23,6 +23,7 @@ import {
 } from '../auth.js';
 import { parse } from '../contracts.js';
 import { InvitationService } from './service.js';
+import { OnboardingService } from '../onboarding/service.js';
 import type { Manager, Scope } from './types.js';
 const scopeSchema = z.strictObject({
   environment: z.enum(['development', 'test', 'preview', 'production']),
@@ -99,6 +100,7 @@ export class InvitationPlatformGuard extends PlatformGuard {
         this.config.issuer,
         req.platformSubject,
       );
+      req.platformExpiresAt=Math.floor(claims.exp!*1000);
       return true;
     } catch {
       throw new UnauthorizedException('Platform session unavailable');
@@ -222,6 +224,7 @@ export class ClubInvitationsController {
 export class AcceptanceController {
   constructor(
     @Inject(InvitationService) private readonly invitations: InvitationService,
+    @Inject(OnboardingService) private readonly onboarding: OnboardingService,
   ) {}
   @Post('preview') preview(
     @Param('environment') e: string,
@@ -250,6 +253,6 @@ export class AcceptanceController {
     @Param('tenantId') t: string,
     @Req() req: Request,
   ) {
-    return this.invitations.status(scope(e, t), bearer(req));
+    return this.onboarding.status(scope(e, t), bearer(req));
   }
 }

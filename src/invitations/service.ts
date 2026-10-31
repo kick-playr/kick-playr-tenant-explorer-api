@@ -39,6 +39,7 @@ export class InvitationService {
     private readonly identity: IdentityPort,
     private readonly vault: CredentialVault,
     private readonly delivery: DeliveryPort,
+    private readonly provisioningCheck?: (scope: Scope) => Promise<void>,
   ) {}
   private binding(s: Scope) {
     const found = this.bindings.filter(
@@ -162,6 +163,7 @@ export class InvitationService {
       this.current(tx, b);
       this.manage(tx, m, a);
     });
+    await this.provisioningCheck?.(s);
     let target = recipient.kind === 'email' ? email(recipient.email) : '';
     if (recipient.kind === 'subject') {
       if (!/^user_[A-Za-z0-9_-]{1,120}$/.test(recipient.subject))
@@ -182,6 +184,15 @@ export class InvitationService {
     return this.repository.transact(s, async (tx) => {
       this.current(tx, b);
       this.manage(tx, m, a);
+      if (
+        this.provisioningCheck &&
+        !tx.state.onboarding?.ownerCompletedAt &&
+        tx.state.onboarding?.provisioning?.configRevision !==
+          tx.tenant.definition.configRevision
+      )
+        throw new ConflictException(
+          'Plattform-Vorbereitung wurde geändert; erneut prüfen',
+        );
       this.rate(tx, m, a);
       const bootstrap = !tx.state.owner;
       if (bootstrap && m.kind !== 'platform') throw denied();

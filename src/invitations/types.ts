@@ -1,4 +1,8 @@
 import type { Envelope } from '../contracts.js';
+import type {
+  OnboardingState,
+  RuntimePublication,
+} from '../onboarding/types.js';
 export interface Scope {
   environment: string;
   tenantId: string;
@@ -9,12 +13,14 @@ export interface RealmBinding extends Scope {
   audience: string;
   authorizedParties: string[];
   secretKey: string;
+  secretKeyEnv?: string;
 }
 export interface Identity {
   issuer: string;
   subject: string;
   sessionId: string;
   emails: string[];
+  expiresAt?: number;
 }
 export type Manager =
   | { kind: 'platform'; issuer: string; subject: string }
@@ -54,6 +60,7 @@ export interface Invitation {
   };
 }
 export interface InvitationState {
+  onboarding?: OnboardingState;
   rates?: { actor: string; times: number[] }[];
   lastEvent?: { action: string; actor: string; resource: string };
   revision: number;
@@ -63,6 +70,7 @@ export interface InvitationState {
   bootstrapInvitationId?: string;
 }
 export interface InvitationTransaction {
+  publishRuntime?: (input: RuntimePublication) => Promise<void>;
   revokeRuntime?: (issuer: string, subject: string) => Promise<void>;
   tenant: {
     definition: {
@@ -92,6 +100,7 @@ export interface IdentityPort {
 }
 export interface DeliveryPort {
   ready?: boolean;
+  verify?(): Promise<unknown>;
   send(message: {
     to: string;
     url: string;
