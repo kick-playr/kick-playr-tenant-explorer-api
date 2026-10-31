@@ -129,10 +129,25 @@ export class ProvisioningController {
       ...guide,
       keys,
       mongo: await this.mongo.status(s),
+      keySetup: await this.mongo.keyStatus(s),
       environmentSnippet: [
         ...variables.map((v) => v + '=<32-Byte-Schlüssel in Base64>'),
       ].join('\n'),
     };
+  }
+  @Post('configure-keys')
+  @UseGuards(InvitationPlatformGuard)
+  configureKeys(
+    @Param('environment') e: string,
+    @Param('tenantId') t: string,
+    @Req() req: PlatformRequest,
+    @Body() body: unknown,
+  ) {
+    return this.mongo.configureKeys(scope(e, t), body, {
+      issuer: this.auth.issuer,
+      subject: req.platformSubject,
+      expiresAt: req.platformExpiresAt,
+    });
   }
   @Post('mongo-url')
   @UseGuards(InvitationPlatformGuard)

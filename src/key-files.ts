@@ -28,7 +28,7 @@ const configSchema = z.strictObject({
   version: z.literal(1),
   bindings: z.array(bindingSchema).max(256),
 });
-type KeyBinding = z.infer<typeof bindingSchema>;
+export type KeyBinding = z.infer<typeof bindingSchema>;
 type KeyTenant = {
   id: string;
   environment: string;
@@ -60,6 +60,7 @@ export class KeyFileRegistry {
     bindings: unknown = [],
     private readonly controlDatabase = '',
     private readonly environment: NodeJS.ProcessEnv = process.env,
+    private readonly loadBindings?: () => Promise<KeyBinding[]>,
   ) {
     const parsed = configSchema.safeParse({ version: 1, bindings });
     if (!parsed.success) throw new Error('Invalid explorer key-file bindings');
@@ -81,6 +82,12 @@ export class KeyFileRegistry {
     );
   }
   async describe(tenant: KeyTenant): Promise<KeyFilesView> {
+    if (this.loadBindings)
+      return new KeyFileRegistry(
+        await this.loadBindings(),
+        this.controlDatabase,
+        this.environment,
+      ).describe(tenant);
     const reference = tenant.secretReferences.key;
     const binding = this.bindings.find(
       (b) =>
@@ -137,7 +144,7 @@ export function runtimeKeyBindings(
   payload: unknown,
   database: string,
   explicit: unknown[],
-): unknown[] {
+): KeyBinding[] {
   const existing = configSchema.parse({
     version: 1,
     bindings: explicit,
@@ -148,7 +155,6 @@ export function runtimeKeyBindings(
   if (
     !['workflow-real', 'workflow-local'].includes(manifest.profile as string) ||
     !Array.isArray(manifest.tenants) ||
-    !manifest.tenants.length ||
     manifest.tenants.length > 32
   )
     throw new Error('Invalid runtime key bindings');

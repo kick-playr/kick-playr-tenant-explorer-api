@@ -10,6 +10,7 @@ import { environmentSchema, identifier, parse } from '../contracts.js';
 import { runtimeTransport } from '../runtime-transport.js';
 export type SetupAction =
   | 'provisioning'
+  | 'key-check'
   | 'settings'
   | 'save-settings'
   | 'bexio'
@@ -79,10 +80,16 @@ export class SetupRuntime implements SetupRuntimePort {
     action: SetupAction,
     input: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    const b = this.bindings.find(
-      (b) =>
-        b.environment === scope.environment && b.tenantId === scope.tenantId,
-    );
+    // Key inspection is platform-only on the receiver and needs no operational
+    // tenant row. Reuse a database-pinned development origin for this action only.
+    const b =
+      this.bindings.find(
+        (b) =>
+          b.environment === scope.environment && b.tenantId === scope.tenantId,
+      ) ??
+      (action === 'key-check' && scope.environment === 'development'
+        ? this.bindings.find((b) => b.environment === 'development')
+        : undefined);
     const key = Buffer.from(this.keyText ?? '', 'base64');
     if (!b || key.length !== 32 || key.toString('base64') !== this.keyText) {
       key.fill(0);
@@ -91,15 +98,27 @@ export class SetupRuntime implements SetupRuntimePort {
       );
     }
     const issuedAt = Date.now();
-    const expiresAt=Math.min(issuedAt+30000,actor.expiresAt??issuedAt+30000);
-    if(!Number.isSafeInteger(expiresAt) || expiresAt<=issuedAt){key.fill(0);throw new ForbiddenException('Einrichtungssitzung abgelaufen; erneut anmelden');}
+    const expiresAt = Math.min(
+      issuedAt + 30000,
+      actor.expiresAt ?? issuedAt + 30000,
+    );
+    if (!Number.isSafeInteger(expiresAt) || expiresAt <= issuedAt) {
+      key.fill(0);
+      throw new ForbiddenException(
+        'Einrichtungssitzung abgelaufen; erneut anmelden',
+      );
+    }
     const raw = JSON.stringify({
       version: 1,
       nonce: randomBytes(32).toString('base64url'),
       issuedAt,
       expiresAt,
       scope,
-      actor:{issuer:actor.issuer,subject:actor.subject,membershipId:actor.membershipId},
+      actor: {
+        issuer: actor.issuer,
+        subject: actor.subject,
+        membershipId: actor.membershipId,
+      },
       action,
       input,
     });

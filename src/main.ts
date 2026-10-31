@@ -67,31 +67,40 @@ async function bootstrap() {
       process.env,
     );
   const sender = invitationSender(process.env);
+  const setupRuntime = new SetupRuntime(
+    config.setupRuntimes ?? config.clubRuntimes,
+    process.env.MANAGER_SETUP_CONTROL_KEY,
+  );
+  const runtimeMongo = new RuntimeMongoService(
+    client,
+    database,
+    Buffer.from(rootText, 'base64'),
+    required('EXPLORER_MONGODB_URI'),
+    process.env,
+    setupRuntime,
+  );
   const onboarding = new OnboardingService(
     invitationRepository,
     bindings,
     identity,
-    new SetupRuntime(
-      config.setupRuntimes ?? config.clubRuntimes,
-      process.env.MANAGER_SETUP_CONTROL_KEY,
-    ),
+    setupRuntime,
     sender,
   );
   let app: Awaited<ReturnType<typeof createApp>> | undefined;
   try {
     app = await createApp({
       clubRuntime: new ClubRuntime(config.clubRuntimes),
-      keyFiles: new KeyFileRegistry(config.keyBindings.bindings, database),
+      keyFiles: new KeyFileRegistry(
+        config.keyBindings.bindings,
+        database,
+        process.env,
+        () => runtimeMongo.loadKeyBindings(),
+      ),
       publicRealms: new PublicRealmDirectory(config),
       repository: new MongoRepository(client, database),
       vault,
       onboarding,
-      runtimeMongo: new RuntimeMongoService(
-        client,
-        database,
-        Buffer.from(rootText, 'base64'),
-        required('EXPLORER_MONGODB_URI'),
-      ),
+      runtimeMongo,
       invitations: new InvitationService(
         invitationRepository,
         bindings,
@@ -111,6 +120,7 @@ async function bootstrap() {
     await app.listen(port, process.env.HOST ?? '127.0.0.1');
   } catch (error) {
     await app?.close();
+    runtimeMongo.onModuleDestroy();
     await client.close();
     throw error;
   }

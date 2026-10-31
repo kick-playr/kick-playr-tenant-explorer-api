@@ -165,3 +165,23 @@ In **Users → Add user / Edit user**, **Tenant administrator** adds the club se
 The exact shorthand `club:*:*` expands at save time into the current concrete club-permission catalog in `src/tenant-permissions.ts`. It never grants platform permissions or access to other tenants, and no wildcard is stored in runtime authority records. Future permissions are not automatically granted; update the catalog and save the grant again when intentionally widening access. Other wildcard patterns are rejected.
 
 User writes send `expectedRevision` (runtime configuration) and `expectedAuthorityRevision` (access generation). Adding, replacing or revoking a grant advances authority/grant/support generations without changing the runtime configuration revision or encrypted-data bindings. Legacy callers that omit the authority revision are accepted only while the two revision values still match; stale or ambiguous edits fail closed and must be reloaded.
+
+### Register tenant keys before runtime creation
+
+During platform onboarding, install the three independently generated tenant keys
+under the displayed `WORKFLOW_REAL_<TENANT>_WRAPPING_KEY_V1`, `_INDEX_KEY` and
+`_CONTROL_KEY` names in both APIs' server environments. Choose **Schlüssel
+konfigurieren** before the first manager invitation. This checks fresh,
+short-lived HMAC attestations from both APIs and stores only the variable mapping
+in the encrypted runtime document's `explorer.keyBindings.bindings`. Key values
+and proofs are never returned to the browser or stored in the mapping. Existing
+keys and mappings are retained; this action is not key rotation.
+
+The development key check uses an existing database-pinned setup runtime origin
+when the new tenant has no individual runtime binding. Only this platform-only
+inspection action has that fallback. Operational/setup actions still require
+their exact tenant binding and complete runtime configuration. Key-status reads
+refresh mappings from the encrypted database immediately, without restarting the
+API. A saved mapping clears provisioning verification; complete runtime metadata,
+MongoDB, Clerk, provider setup and subsequent verification remain required before
+inviting the first manager. Preview/production HSM custody is still unavailable.

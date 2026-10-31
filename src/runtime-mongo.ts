@@ -5,7 +5,19 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { createHash, randomUUID } from 'node:crypto';
+import {
+  createHash,
+  randomUUID,
+  randomBytes,
+  timingSafeEqual,
+} from 'node:crypto';
+import {
+  KeyFileRegistry,
+  runtimeKeyBindings,
+  type KeyBinding,
+} from './key-files.js';
+import { KEY_KINDS, keyBindingProof } from './key-binding-proof.js';
+import type { SetupRuntimePort } from './onboarding/runtime.js';
 import type { MongoClient } from 'mongodb';
 import { ConnectionString } from 'mongodb-connection-string-url';
 import { z } from 'zod';
@@ -104,6 +116,8 @@ export class RuntimeMongoService {
     private readonly database: string,
     private readonly key: Buffer,
     private readonly controlUri: string,
+    private readonly environment: NodeJS.ProcessEnv = process.env,
+    private readonly keyRuntime?: SetupRuntimePort,
   ) {
     if (key.length !== 32 || !/^[A-Za-z0-9_-]{1,63}$/.test(database))
       throw unavailable();
@@ -127,7 +141,7 @@ export class RuntimeMongoService {
   private revision(row: RuntimeEnvelope) {
     return createHash('sha256').update(JSON.stringify(row)).digest('hex');
   }
-  private async root(opts: Record<string, unknown>) {
+  private async envelope(opts: Record<string, unknown>) {
     this.active();
     const row = await this.client
       .db(this.database)
@@ -139,6 +153,11 @@ export class RuntimeMongoService {
     } catch {
       throw unavailable();
     }
+    if (payload.version !== 2 || !row) throw unavailable();
+    return { row, payload };
+  }
+  private async root(opts: Record<string, unknown>) {
+    const { row, payload } = await this.envelope(opts);
     if (
       payload.version !== 2 ||
       !['workflow-real', 'workflow-local'].includes(String(payload.profile)) ||
@@ -177,8 +196,6 @@ export class RuntimeMongoService {
     const editable =
       definition.status === 'provisioning' &&
       positive(definition.configRevision) &&
-      definition.secretReferences?.mongoUri ===
-        `workflow-local:${s.tenantId}:mongo` &&
       authority?.schema === 1 &&
       authority.status === 'disabled' &&
       authority.configRevision === definition.configRevision &&
@@ -228,13 +245,442 @@ export class RuntimeMongoService {
         : null;
     return {
       configured: source !== null,
-      editable: tenant.editable,
+      editable:
+        tenant.editable &&
+        tenant.definition.secretReferences?.mongoUri ===
+          `workflow-local:${s.tenantId}:mongo`,
       available: true,
       revision: this.revision(root.row),
       source,
       requiresReload: source !== null,
       onboardingRevision: tenant.invitations?.revision ?? 0,
     };
+  }
+  private async persist(
+    s: Scope,
+    root: Awaited<ReturnType<RuntimeMongoService['root']>>,
+    tenant: Awaited<ReturnType<RuntimeMongoService['tenant']>>,
+    opts: Record<string, unknown>,
+    actor: { subject: string | undefined },
+    action: string,
+    resource: string,
+  ) {
+    const fence = await this.collection('tenantDefinitions').updateOne(
+      {
+        id: s.tenantId,
+        environment: s.environment,
+        status: 'provisioning',
+        configRevision: tenant.definition.configRevision,
+      },
+      { $inc: { invitationFence: 1 } },
+      opts,
+    );
+    if (fence.matchedCount !== 1) throw conflict();
+    const authorityFence = await this.collection(
+      'tenantRuntimeAuthorities',
+    ).updateOne(
+      {
+        tenantId: s.tenantId,
+        environment: s.environment,
+        status: 'disabled',
+        authorityRevision: tenant.authority!.authorityRevision,
+      },
+      { $inc: { authorityRevision: 1, supportRevision: 1 } },
+      opts,
+    );
+    if (authorityFence.matchedCount !== 1) throw conflict();
+    const sealed = encodeRuntimeEnvelope(root.payload, this.key, this.database);
+    const changed = await this.client
+      .db(this.database)
+      .collection<RuntimeEnvelope>('tenantWorkflowConfiguration')
+      .replaceOne(root.row, sealed, opts);
+    if (changed.matchedCount !== 1) throw conflict();
+    const state = tenant.invitations
+      ? structuredClone(tenant.invitations)
+      : ({
+          _id: `${s.environment}/${s.tenantId}`,
+          revision: 0,
+          invitations: [],
+          principals: [],
+        } as Record<string, any>);
+    if (state.onboarding) delete state.onboarding.provisioning;
+    state.revision++;
+    if (tenant.invitations) {
+      const saved = await this.collection(
+        'tenantManagerInvitations',
+      ).replaceOne(
+        {
+          _id: `${s.environment}/${s.tenantId}` as never,
+          revision: tenant.invitations.revision,
+        },
+        state,
+        opts,
+      );
+      if (saved.matchedCount !== 1) throw conflict();
+    } else
+      await this.collection('tenantManagerInvitations').insertOne(state, opts);
+    await this.collection('tenantExplorerAudit').insertOne(
+      {
+        id: randomUUID(),
+        environment: s.environment,
+        tenantId: s.tenantId,
+        action,
+        actor: actor.subject,
+        resource,
+        revision: tenant.definition.configRevision,
+        at: new Date().toISOString(),
+      },
+      opts,
+    );
+    return {
+      revision: this.revision(sealed),
+      onboardingRevision: state.revision as number,
+    };
+  }
+
+  async loadKeyBindings(): Promise<KeyBinding[]> {
+    this.active();
+    const root = await this.envelope({ maxTimeMS: 3000 });
+    return this.bindings(root);
+  }
+  private bindings(root: { payload: Record<string, unknown> }) {
+    const explorer = root.payload.explorer as any;
+    if (
+      !explorer ||
+      explorer.keyBindings?.version !== 1 ||
+      !Array.isArray(explorer.keyBindings.bindings)
+    )
+      throw unavailable();
+    const bindings = runtimeKeyBindings(
+      root.payload,
+      this.database,
+      explorer.keyBindings.bindings,
+    );
+    new KeyFileRegistry(bindings, this.database, this.environment);
+    return bindings;
+  }
+  private candidate(
+    s: Scope,
+    root: Awaited<ReturnType<RuntimeMongoService['root']>>,
+    tenant: Awaited<ReturnType<RuntimeMongoService['tenant']>>,
+  ): KeyBinding {
+    const reference = tenant.definition.secretReferences?.key;
+    if (
+      s.environment !== 'development' ||
+      reference !== `workflow-local:${s.tenantId}:key`
+    )
+      throw new BadRequestException('Tenant key adapter unavailable');
+    const prefix = `WORKFLOW_REAL_${s.tenantId.replace(/-/g, '_').toUpperCase()}`;
+    const binding = this.bindings(root).find(
+      (b) =>
+        b.environment === s.environment &&
+        b.tenantId === s.tenantId &&
+        b.controlDatabase === this.database &&
+        b.keyReference === reference,
+    ) ?? {
+      ...s,
+      environment: 'development' as const,
+      controlDatabase: this.database,
+      keyReference: reference,
+      version: 'v1',
+      profile: String(root.payload.profile),
+      variables: {
+        wrapping: `${prefix}_WRAPPING_KEY_V1`,
+        index: `${prefix}_INDEX_KEY`,
+        control: `${prefix}_CONTROL_KEY`,
+      },
+    };
+    if (binding.version !== 'v1' || binding.profile !== root.payload.profile)
+      throw new BadRequestException('Tenant key adapter unavailable');
+    return binding;
+  }
+  async keyStatus(s: Scope) {
+    this.scope(s);
+    this.active();
+    if (s.environment !== 'development')
+      return {
+        available: false,
+        editable: false,
+        registered: false,
+        revision: null,
+        local: null,
+      };
+    const root = await this.root({ maxTimeMS: 3000 }),
+      tenant = await this.tenant(s, { maxTimeMS: 3000 }),
+      binding = this.candidate(s, root, tenant);
+    return {
+      available: !!this.keyRuntime,
+      editable: tenant.editable && !!this.keyRuntime,
+      registered: this.bindings(root).some(
+        (b) =>
+          b.tenantId === s.tenantId &&
+          b.environment === s.environment &&
+          b.controlDatabase === this.database &&
+          b.keyReference === binding.keyReference,
+      ),
+      revision: this.revision(root.row),
+      local: await new KeyFileRegistry(
+        [binding],
+        this.database,
+        this.environment,
+      ).describe(tenant.definition as any),
+      onboardingRevision: tenant.invitations?.revision ?? 0,
+    };
+  }
+  private localProofs(
+    binding: KeyBinding,
+    configRevision: number,
+    challenge: string,
+    expiresAt: number,
+    others: KeyBinding[] = [],
+  ) {
+    const owned: Buffer[] = [],
+      transport = Buffer.from(
+        this.environment.MANAGER_SETUP_CONTROL_KEY ?? '',
+        'base64',
+      );
+    try {
+      for (const kind of KEY_KINDS) {
+        const value = this.environment[binding.variables[kind]],
+          key = Buffer.from(value ?? '', 'base64');
+        owned.push(key);
+        const suffix = {
+          wrapping: 'WRAPPING_KEY_V1',
+          index: 'INDEX_KEY',
+          control: 'CONTROL_KEY',
+        }[kind];
+        if (
+          !binding.variables[kind].endsWith(suffix) ||
+          key.length !== 32 ||
+          key.toString('base64') !== value ||
+          key.equals(this.key) ||
+          key.equals(transport) ||
+          owned.slice(0, -1).some((other) => other.equals(key))
+        )
+          throw new BadRequestException(
+            'Three valid independent tenant keys are required in this API environment',
+          );
+      }
+      for (const other of others.filter(
+        (other) =>
+          other.environment === binding.environment &&
+          other.controlDatabase === binding.controlDatabase &&
+          other.tenantId !== binding.tenantId,
+      )) {
+        for (const name of Object.values(other.variables)) {
+          const bytes = Buffer.from(this.environment[name] ?? '', 'base64');
+          try {
+            if (owned.some((key) => key.equals(bytes)))
+              throw new BadRequestException(
+                'Tenant keys must not be shared between tenants',
+              );
+          } finally {
+            bytes.fill(0);
+          }
+        }
+      }
+      const proofBinding = { ...binding, configRevision, expiresAt };
+      return Object.fromEntries(
+        KEY_KINDS.map((kind, index) => [
+          kind,
+          keyBindingProof(
+            owned[index]!,
+            proofBinding,
+            challenge,
+            kind,
+            binding.variables[kind],
+          ),
+        ]),
+      );
+    } finally {
+      owned.forEach((key) => key.fill(0));
+      transport.fill(0);
+    }
+  }
+  async configureKeys(
+    s: Scope,
+    body: unknown,
+    actor: {
+      issuer: string | undefined;
+      subject: string | undefined;
+      expiresAt: number | undefined;
+    },
+  ) {
+    this.scope(s);
+    this.active();
+    const input = parse(inputSchema.omit({ uri: true }), body);
+    const live = () => {
+      this.active();
+      if (
+        !actor.issuer ||
+        !actor.subject ||
+        !Number.isSafeInteger(actor.expiresAt) ||
+        actor.expiresAt! <= Date.now()
+      )
+        throw new ForbiddenException('Platform authorization expired');
+    };
+    live();
+    if (!this.keyRuntime) throw unavailable();
+    const initial = await this.root({ maxTimeMS: 3000 }),
+      tenant = await this.tenant(s, { maxTimeMS: 3000 }),
+      candidate = this.candidate(s, initial, tenant);
+    if (!tenant.editable)
+      throw new ConflictException(
+        'Configure keys before the first manager invitation',
+      );
+    if (this.revision(initial.row) !== input.expectedRevision) throw conflict();
+    const challenge = randomBytes(32).toString('base64url');
+    this.localProofs(
+      candidate,
+      tenant.definition.configRevision,
+      challenge,
+      Date.now() + 30000,
+      this.bindings(initial),
+    );
+    // Network checks never run inside the retried Mongo transaction.
+    const proof = parse(
+      z.strictObject({
+        environment: z.literal(s.environment),
+        tenantId: z.literal(s.tenantId),
+        configRevision: z.literal(tenant.definition.configRevision),
+        keyReference: z.literal(candidate.keyReference),
+        expiresAt: z.number().int().positive(),
+        variables: z.strictObject({
+          wrapping: z.literal(candidate.variables.wrapping),
+          index: z.literal(candidate.variables.index),
+          control: z.literal(candidate.variables.control),
+        }),
+        proofs: z.strictObject({
+          wrapping: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+          index: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+          control: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+        }),
+      }),
+      await this.keyRuntime.request(
+        s,
+        {
+          issuer: actor.issuer!,
+          subject: actor.subject!,
+          membershipId: 'platform',
+          expiresAt: actor.expiresAt,
+        },
+        'key-check',
+        { challenge },
+      ),
+    );
+    if (
+      proof.expiresAt > actor.expiresAt! ||
+      proof.expiresAt > Date.now() + 30000
+    )
+      throw new BadRequestException('Invalid runtime key proof');
+    const validate = (binding: KeyBinding, revision: number) => {
+      live();
+      if (proof.expiresAt <= Date.now())
+        throw new ForbiddenException('Runtime key check expired; try again');
+      if (
+        revision !== proof.configRevision ||
+        binding.keyReference !== proof.keyReference ||
+        KEY_KINDS.some(
+          (kind) => binding.variables[kind] !== proof.variables[kind],
+        )
+      )
+        throw conflict();
+      const expected = this.localProofs(
+        binding,
+        revision,
+        challenge,
+        proof.expiresAt,
+        this.bindings(initial),
+      );
+      if (
+        KEY_KINDS.some(
+          (kind) =>
+            !timingSafeEqual(
+              Buffer.from(expected[kind]!, 'base64url'),
+              Buffer.from(proof.proofs[kind], 'base64url'),
+            ),
+        )
+      )
+        throw new BadRequestException(
+          'Tenant API and runtime API keys do not match',
+        );
+    };
+    validate(candidate, tenant.definition.configRevision);
+    const session = this.client.startSession();
+    try {
+      return await session.withTransaction(
+        async () => {
+          live();
+          const opts = { session, maxTimeMS: 3000 },
+            root = await this.root(opts),
+            current = await this.tenant(s, opts);
+          if (
+            !current.editable ||
+            this.revision(root.row) !== input.expectedRevision
+          )
+            throw conflict();
+          const binding = this.candidate(s, root, current);
+          validate(binding, current.definition.configRevision);
+          const explorer = root.payload.explorer as any;
+          const previous = explorer.keyBindings.bindings.find(
+            (b: any) =>
+              b.tenantId === s.tenantId &&
+              b.environment === s.environment &&
+              b.controlDatabase === this.database &&
+              b.keyReference === binding.keyReference,
+          );
+          // Binding an existing key is not a rotation: an existing mapping must remain identical.
+          if (
+            previous &&
+            ([
+              'tenantId',
+              'environment',
+              'controlDatabase',
+              'keyReference',
+              'version',
+              'profile',
+            ].some(
+              (field) => previous[field] !== binding[field as keyof KeyBinding],
+            ) ||
+              KEY_KINDS.some(
+                (kind) => previous.variables[kind] !== binding.variables[kind],
+              ))
+          )
+            throw conflict();
+          if (!previous) explorer.keyBindings.bindings.push(binding);
+          this.bindings(root);
+          const result = await this.persist(
+            s,
+            root,
+            current,
+            opts,
+            actor,
+            'tenant.keys.configured',
+            'runtime-keys',
+          );
+          validate(binding, current.definition.configRevision);
+          return {
+            ...result,
+            available: true,
+            editable: true,
+            registered: true,
+            local: await new KeyFileRegistry(
+              [binding],
+              this.database,
+              this.environment,
+            ).describe(current.definition as any),
+          };
+        },
+        {
+          readPreference: 'primary',
+          readConcern: { level: 'snapshot' },
+          writeConcern: { w: 'majority', wtimeoutMS: 5000 },
+          maxCommitTimeMS: 3000,
+        },
+      );
+    } finally {
+      await session.endSession();
+    }
   }
   async save(
     s: Scope,
@@ -266,7 +712,11 @@ export class RuntimeMongoService {
           const opts = { session, maxTimeMS: 3000 },
             root = await this.root(opts),
             tenant = await this.tenant(s, opts);
-          if (!tenant.editable)
+          if (
+            !tenant.editable ||
+            tenant.definition.secretReferences?.mongoUri !==
+              `workflow-local:${s.tenantId}:mongo`
+          )
             throw new ConflictException(
               'MongoDB URL can only be configured before the first manager invitation',
             );
@@ -312,30 +762,6 @@ export class RuntimeMongoService {
               'Use a distinct tenant database on the configured TLS runtime cluster with its configured credentials and authSource',
             );
           }
-          const fence = await this.collection('tenantDefinitions').updateOne(
-            {
-              id: s.tenantId,
-              environment: s.environment,
-              status: 'provisioning',
-              configRevision: tenant.definition.configRevision,
-            },
-            { $inc: { invitationFence: 1 } },
-            opts,
-          );
-          if (fence.matchedCount !== 1) throw conflict();
-          const authorityFence = await this.collection(
-            'tenantRuntimeAuthorities',
-          ).updateOne(
-            {
-              tenantId: s.tenantId,
-              environment: s.environment,
-              status: 'disabled',
-              authorityRevision: tenant.authority!.authorityRevision,
-            },
-            { $inc: { authorityRevision: 1, supportRevision: 1 } },
-            opts,
-          );
-          if (authorityFence.matchedCount !== 1) throw conflict();
           const pending = root.pending.filter((t) => t.tenantId !== s.tenantId);
           if (existing) existing.mongoUri = input.uri;
           else pending.push({ tenantId: s.tenantId, mongoUri: input.uri });
@@ -343,65 +769,24 @@ export class RuntimeMongoService {
             throw new BadRequestException('Provisioning draft limit reached');
           if (pending.length) root.payload.pendingMongoBindings = pending;
           else delete root.payload.pendingMongoBindings;
-          const sealed = encodeRuntimeEnvelope(
-            root.payload,
-            this.key,
-            this.database,
-          );
-          const changed = await this.client
-            .db(this.database)
-            .collection<RuntimeEnvelope>('tenantWorkflowConfiguration')
-            .replaceOne(root.row, sealed, opts);
-          if (changed.matchedCount !== 1) throw conflict();
-          const state = tenant.invitations
-            ? structuredClone(tenant.invitations)
-            : ({
-                _id: `${s.environment}/${s.tenantId}`,
-                revision: 0,
-                invitations: [],
-                principals: [],
-              } as Record<string, any>);
-          if (state.onboarding) delete state.onboarding.provisioning;
-          state.revision++;
-          if (tenant.invitations) {
-            const saved = await this.collection(
-              'tenantManagerInvitations',
-            ).replaceOne(
-              {
-                _id: `${s.environment}/${s.tenantId}` as never,
-                revision: tenant.invitations.revision,
-              },
-              state,
-              opts,
-            );
-            if (saved.matchedCount !== 1) throw conflict();
-          } else
-            await this.collection('tenantManagerInvitations').insertOne(
-              state,
-              opts,
-            );
-          await this.collection('tenantExplorerAudit').insertOne(
-            {
-              id: randomUUID(),
-              environment: s.environment,
-              tenantId: s.tenantId,
-              action: 'tenant.mongodb.configured',
-              actor: actor.subject,
-              resource: 'runtime-mongodb',
-              revision: tenant.definition.configRevision,
-              at: new Date().toISOString(),
-            },
+          const saved = await this.persist(
+            s,
+            root,
+            tenant,
             opts,
+            actor,
+            'tenant.mongodb.configured',
+            'runtime-mongodb',
           );
           live();
           return {
             configured: true,
             editable: true,
             available: true,
-            revision: this.revision(sealed),
+            revision: saved.revision,
             source: existing ? 'runtime' : 'pending',
             requiresReload: true,
-            onboardingRevision: state.revision,
+            onboardingRevision: saved.onboardingRevision,
           } as MongoConfigurationStatus;
         },
         {
