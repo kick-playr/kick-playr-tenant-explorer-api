@@ -119,3 +119,81 @@ test('database bindings reject file paths and public key variables', () => {
     /Duplicate/,
   );
 });
+
+test('derives DEMO key metadata from the encrypted runtime manifest without duplicate explorer registration', async () => {
+  const { runtimeKeyBindings } = await import('../src/key-files.js');
+  const row = {
+    id: 'demo',
+    wrappingKeyRef: 'env:WORKFLOW_REAL_DEMO_WRAPPING_KEY_V1',
+    indexKeyRef: 'env:WORKFLOW_REAL_DEMO_INDEX_KEY',
+    controlKeyRef: 'env:WORKFLOW_REAL_DEMO_CONTROL_KEY',
+  };
+  const bindings = runtimeKeyBindings(
+    { profile: 'workflow-real', tenants: [row] },
+    'control',
+    [],
+  );
+  const env = Object.fromEntries(
+    ['WRAPPING_KEY_V1', 'INDEX_KEY', 'CONTROL_KEY'].map((suffix, i) => [
+      `WORKFLOW_REAL_DEMO_${suffix}`,
+      Buffer.alloc(32, i + 1).toString('base64'),
+    ]),
+  );
+  const registry = new KeyFileRegistry(bindings, 'control', env);
+  const result = await registry.describe({
+    id: 'demo',
+    environment: 'development',
+    secretReferences: { key: 'workflow-local:demo:key' },
+  });
+  assert.equal(result.status, 'connected');
+  assert.equal(result.files.length, 3);
+  assert.ok(
+    !JSON.stringify(bindings).includes(env.WORKFLOW_REAL_DEMO_INDEX_KEY!),
+  );
+  assert.equal(
+    (
+      await registry.describe({
+        id: 'other',
+        environment: 'development',
+        secretReferences: { key: 'workflow-local:demo:key' },
+      })
+    ).status,
+    'unbound',
+  );
+  const stale = structuredClone(bindings) as any[];
+  stale[0].version = 'v2';
+  stale[0].profile = 'workflow-local';
+  const refreshed = runtimeKeyBindings(
+    { profile: 'workflow-real', tenants: [row] },
+    'control',
+    stale,
+  ) as any[];
+  assert.equal(refreshed[0].version, 'v1');
+  assert.equal(refreshed[0].profile, 'workflow-real');
+  const changed = structuredClone(bindings) as any[];
+  changed[0].variables.index = 'OTHER_INDEX_KEY';
+  assert.throws(() =>
+    runtimeKeyBindings(
+      { profile: 'workflow-real', tenants: [row] },
+      'control',
+      changed,
+    ),
+  );
+  assert.throws(() =>
+    runtimeKeyBindings(
+      { profile: 'workflow-real', tenants: [row, row] },
+      'control',
+      [],
+    ),
+  );
+  assert.throws(() =>
+    runtimeKeyBindings(
+      {
+        profile: 'workflow-real',
+        tenants: [{ ...row, indexKeyRef: 'env:NEXT_PUBLIC_INDEX_KEY' }],
+      },
+      'control',
+      [],
+    ),
+  );
+});

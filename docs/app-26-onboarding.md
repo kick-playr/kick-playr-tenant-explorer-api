@@ -21,7 +21,7 @@ Existing FCRWW references remain `workflow-local:fcrww:mongo` and `workflow-loca
 5. Configure the setup API destination. Encrypted `explorer.setupRuntimes` optionally specifies `{ environment, tenantId, origin }`; it is independent of ordinary `clubRuntimes`. This allows first-owner setup to use the main API's setup composition before ordinary runtime authorization exists. If omitted, the existing club-runtime origin is used. Origins are fixed server-side and validated; no browser URL or connection string is forwarded.
 6. Configure the existing platform SMTPS invitation sender. Verify infrastructure before the first invitation; a fresh matching receipt is required. SMTP verification confirms connection/authentication, not mailbox delivery. Live Clerk audience/session/email verification occurs when the invited manager signs in.
 
-The installed setup key-custody adapter is the existing development environment implementation. Its database bindings match the ordinary runtime’s finite development profiles (currently FCRWW and FC Uster); an arbitrary MongoDB URI does not make another tenant operational. Unsupported tenants remain blocked until a compatible ordinary runtime is installed. Preview/production references are generated correctly, but setup fails closed without a verified compatible custody/runtime adapter. HSM/KMS references are not treated as working HSM support; non-exportable keys must stay inside a real provider adapter.
+The installed setup key-custody adapter is the existing development environment implementation. Tenant database/key bindings now come from the authenticated encrypted runtime manifest. Additional registered tenants such as DEMO no longer require a per-club code change; their genuine URI, Clerk/key references, policy and provisioned base are still mandatory. Preview/production references are generated correctly, but setup fails closed without a verified compatible custody/runtime adapter. HSM/KMS references are not treated as working HSM support; non-exportable keys must stay inside a real provider adapter.
 
 ## Manager flow
 
@@ -49,3 +49,9 @@ Collections are created only when authorized operations actually persist state. 
 - Coverage combines the actual encrypted native runtime fixture, protocol/HTTP checks, control-plane completion/publication fixtures and UI/bridge tests. It is not a live Clerk→SMTP→Bexio→MongoDB replica-set acceptance run. No development service was started/restarted.
 
 The implementation was reviewed on isolated `codex/app-26-manager-onboarding` branches before the separately authorized development integration. Environment examples in all four repositories document the relevant variables/manual prerequisites; the main API now includes a setup-specific `.env.example`. Versions for development integration: control-plane API/frontend0.1.2, APP10.0.7, main API10.0.4. No production merge, real invitation, OAuth exchange or grant publication is part of that integration.
+
+## Database-driven registration follow-up
+
+The runtime now loads tenant IDs and explicit operational database paths from authenticated encrypted `tenants[]` metadata, and the explorer derives key bindings from the same rows. Registering a new tenant no longer requires changing a fixed club list. Existing scope/cluster/database isolation and active-authority checks remain enforced. Real MongoDB/Clerk/policy metadata and provisioning are still required; this change does not add a URL-entry UI or invent DEMO configuration.
+
+Development integration versions: tenant API0.1.3 and runtime API10.0.6. Companion tenant/application frontends already contain APP-26 and have no pending changes. The tenant API key-generation helper is included as edited in the primary checkout.
