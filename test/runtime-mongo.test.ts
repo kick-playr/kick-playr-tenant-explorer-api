@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { keyBindingProof } from '../src/key-binding-proof.js';
+import { KeyFileRegistry } from '../src/key-files.js';
 import { RuntimeMongoService } from '../src/runtime-mongo.js';
 import {
   encodeRuntimeEnvelope,
@@ -26,6 +28,7 @@ function fixture(registered = false) {
           },
         ]
       : [],
+    explorer: { keyBindings: { version: 1, bindings: [] } },
     other: { keep: 'OTHER_SECRET' },
   };
   const rows: any = {
@@ -36,7 +39,10 @@ function fixture(registered = false) {
         environment: 'development',
         status: 'provisioning',
         configRevision: 1,
-        secretReferences: { mongoUri: 'workflow-local:demo:mongo' },
+        secretReferences: {
+          mongoUri: 'workflow-local:demo:mongo',
+          key: 'workflow-local:demo:key',
+        },
       },
     ],
     tenantRuntimeAuthorities: [
@@ -117,7 +123,59 @@ function fixture(registered = false) {
       return session;
     },
   };
-  const service = new RuntimeMongoService(client, control, key, uri(control));
+  const environment = {
+    WORKFLOW_REAL_DEMO_WRAPPING_KEY_V1: randomBytes(32).toString('base64'),
+    WORKFLOW_REAL_DEMO_INDEX_KEY: randomBytes(32).toString('base64'),
+    WORKFLOW_REAL_DEMO_CONTROL_KEY: randomBytes(32).toString('base64'),
+  };
+  let mismatch = false;
+  const proofOptions = { lifetime: 20000, tenantId: 'demo' };
+  const runtime: any = {
+    request: async (_scope: any, _actor: any, action: any, input: any) => {
+      assert.equal(action, 'key-check');
+      const binding = {
+        ...scope,
+        tenantId: proofOptions.tenantId,
+        configRevision: 1,
+        keyReference: 'workflow-local:demo:key',
+        expiresAt: Date.now() + proofOptions.lifetime,
+      };
+      const variables = {
+        wrapping: 'WORKFLOW_REAL_DEMO_WRAPPING_KEY_V1',
+        index: 'WORKFLOW_REAL_DEMO_INDEX_KEY',
+        control: 'WORKFLOW_REAL_DEMO_CONTROL_KEY',
+      };
+      return {
+        ...binding,
+        variables,
+        proofs: Object.fromEntries(
+          Object.entries(variables).map(([kind, name]) => [
+            kind,
+            keyBindingProof(
+              Buffer.from(
+                mismatch
+                  ? randomBytes(32).toString('base64')
+                  : environment[name as keyof typeof environment],
+                'base64',
+              ),
+              binding,
+              input.challenge,
+              kind as any,
+              name,
+            ),
+          ]),
+        ),
+      };
+    },
+  };
+  const service = new RuntimeMongoService(
+    client,
+    control,
+    key,
+    uri(control),
+    environment,
+    runtime,
+  );
   const plain = () =>
     decodeRuntimeEnvelope(
       rows.tenantWorkflowConfiguration[0],
@@ -126,6 +184,11 @@ function fixture(registered = false) {
     ) as any;
   return {
     service,
+    environment,
+    proofOptions,
+    mismatch: () => {
+      mismatch = true;
+    },
     rows,
     scope,
     actor,
@@ -360,4 +423,107 @@ test('expiry after encrypted write but before commit rolls back the whole transa
   } finally {
     f.service.onModuleDestroy();
   }
+});
+
+test('registers matching API keys as encrypted metadata without a runtime row, immediately visible through the existing registry', async () => {
+  const f = fixture();
+  const registry = new KeyFileRegistry([], control, f.environment, () =>
+    f.service.loadKeyBindings(),
+  );
+  assert.equal(
+    (await registry.describe(f.rows.tenantDefinitions[0])).status,
+    'unbound',
+  );
+  const before = await f.service.keyStatus(f.scope);
+  assert.equal(before.registered, false);
+  assert.equal(before.local!.status, 'connected');
+  const result = await f.service.configureKeys(
+    f.scope,
+    { expectedRevision: before.revision },
+    { ...f.actor, issuer: 'https://platform.example' },
+  );
+  assert.equal(result.registered, true);
+  assert.notEqual(result.revision, before.revision);
+  assert.equal(result.onboardingRevision, 2);
+  const payload = f.plain();
+  assert.deepEqual(payload.tenants, []);
+  assert.equal(payload.explorer.keyBindings.bindings.length, 1);
+  assert.equal(
+    payload.explorer.keyBindings.bindings[0].variables.index,
+    'WORKFLOW_REAL_DEMO_INDEX_KEY',
+  );
+  assert.equal(f.rows.tenantRuntimeAuthorities[0].status, 'disabled');
+  assert.equal(
+    f.rows.tenantManagerInvitations[0].onboarding.provisioning,
+    undefined,
+  );
+  assert.equal(f.rows.tenantExplorerAudit[0].action, 'tenant.keys.configured');
+  for (const value of Object.values(f.environment))
+    assert.ok(
+      !JSON.stringify({ payload, result, rows: f.rows }).includes(value),
+    );
+  assert.equal(
+    (await registry.describe(f.rows.tenantDefinitions[0])).status,
+    'connected',
+  );
+});
+for (const failure of [
+  'mismatch',
+  'expired-proof',
+  'foreign-proof',
+  'root-key',
+  'missing',
+  'reused',
+  'stale',
+  'invited',
+  'expired-at-commit',
+  'CAS',
+] as const)
+  test(`key registration rejects ${failure} atomically`, async () => {
+    const f = fixture(),
+      before = await f.service.keyStatus(f.scope),
+      snapshot = structuredClone(f.rows);
+    if (failure === 'mismatch') f.mismatch();
+    if (failure === 'expired-proof') f.proofOptions.lifetime = -1;
+    if (failure === 'foreign-proof') f.proofOptions.tenantId = 'other';
+    if (failure === 'root-key')
+      f.environment.WORKFLOW_REAL_DEMO_WRAPPING_KEY_V1 =
+        f.key.toString('base64');
+    if (failure === 'missing') f.environment.WORKFLOW_REAL_DEMO_INDEX_KEY = '';
+    if (failure === 'reused')
+      f.environment.WORKFLOW_REAL_DEMO_INDEX_KEY =
+        f.environment.WORKFLOW_REAL_DEMO_CONTROL_KEY;
+    if (failure === 'invited')
+      f.rows.tenantManagerInvitations[0].invitations.push({ id: 'existing' });
+    if (failure === 'expired-at-commit') f.expireBeforeCommit();
+    if (failure === 'CAS') f.conflict();
+    const expectedRevision =
+      failure === 'stale' ? '0'.repeat(64) : before.revision;
+    await assert.rejects(
+      f.service.configureKeys(
+        f.scope,
+        { expectedRevision },
+        Object.assign(f.actor, { issuer: 'https://platform.example' }),
+      ),
+    );
+    assert.deepEqual(
+      f.rows.tenantWorkflowConfiguration,
+      snapshot.tenantWorkflowConfiguration,
+    );
+    assert.equal(f.rows.tenantExplorerAudit.length, 0);
+    assert.equal(f.rows.tenantRuntimeAuthorities[0].authorityRevision, 1);
+  });
+
+test('dynamic key metadata keeps supported explorer-only envelopes readable without enabling runtime writes', async () => {
+  const f = fixture(),
+    payload = f.plain();
+  delete payload.profile;
+  delete payload.tenants;
+  f.rows.tenantWorkflowConfiguration[0] = encodeRuntimeEnvelope(
+    payload,
+    f.key,
+    control,
+  );
+  assert.deepEqual(await f.service.loadKeyBindings(), []);
+  await assert.rejects(f.service.status(f.scope));
 });

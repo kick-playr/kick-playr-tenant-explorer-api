@@ -53,6 +53,7 @@ test('generated tenant environment snippet contains only tenant key variables', 
     { keyFiles: async () => ({ files: [] }) } as never,
     {} as never,
     {
+      keyStatus: async () => ({ available: false }),
       status: async () => ({
         configured: false,
         editable: false,

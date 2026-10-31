@@ -54,11 +54,59 @@ test('missing setup custody/destination and unsafe origins fail closed', async (
     new SetupRuntime([], undefined).request(s, actor, 'settings', {}),
   );
 });
-test('setup capability never extends the verified Clerk token expiry',async()=>{
-  let expiresAt=0,calls=0;
-  const deadline=Date.now()+5000;
-  const runtime=new SetupRuntime([{...s,origin:'http://localhost:4312'}],Buffer.alloc(32,7).toString('base64'),async(_url,options)=>{calls++;const request=JSON.parse(String(options!.body));expiresAt=request.expiresAt;assert.equal(request.actor.expiresAt,undefined);return Response.json({});});
-  await runtime.request(s,{...actor,expiresAt:deadline},'settings',{});
-  assert.ok(expiresAt<=deadline);
-  await assert.rejects(runtime.request(s,{...actor,expiresAt:Date.now()-1},'settings',{}));assert.equal(calls,1);
+test('setup capability never extends the verified Clerk token expiry', async () => {
+  let expiresAt = 0,
+    calls = 0;
+  const deadline = Date.now() + 5000;
+  const runtime = new SetupRuntime(
+    [{ ...s, origin: 'http://localhost:4312' }],
+    Buffer.alloc(32, 7).toString('base64'),
+    async (_url, options) => {
+      calls++;
+      const request = JSON.parse(String(options!.body));
+      expiresAt = request.expiresAt;
+      assert.equal(request.actor.expiresAt, undefined);
+      return Response.json({});
+    },
+  );
+  await runtime.request(s, { ...actor, expiresAt: deadline }, 'settings', {});
+  assert.ok(expiresAt <= deadline);
+  await assert.rejects(
+    runtime.request(s, { ...actor, expiresAt: Date.now() - 1 }, 'settings', {}),
+  );
+  assert.equal(calls, 1);
+});
+
+test('key inspection alone can use an existing trusted runtime origin before tenant registration', async () => {
+  let calls = 0;
+  const runtime = new SetupRuntime(
+    [{ ...s, origin: 'http://localhost:4312' }],
+    Buffer.alloc(32, 7).toString('base64'),
+    async (url, options) => {
+      calls++;
+      assert.equal(url, 'http://localhost:4312/api/internal/manager-setup');
+      const body = JSON.parse(String(options!.body));
+      assert.equal(body.scope.tenantId, 'demo');
+      assert.equal(body.action, 'key-check');
+      return Response.json({});
+    },
+  );
+  await runtime.request(
+    { ...s, tenantId: 'demo' },
+    { ...actor, membershipId: 'platform' },
+    'key-check',
+    { challenge: 'a'.repeat(43) },
+  );
+  await assert.rejects(
+    runtime.request({ ...s, tenantId: 'demo' }, actor, 'provisioning', {}),
+  );
+  await assert.rejects(
+    runtime.request(
+      { environment: 'preview', tenantId: 'demo' },
+      actor,
+      'key-check',
+      {},
+    ),
+  );
+  assert.equal(calls, 1);
 });

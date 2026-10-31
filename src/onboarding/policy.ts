@@ -93,6 +93,7 @@ export function provisioningGuide(environment: string, tenantId: string) {
           'Die Schlüssel unter den zugeordneten Variablennamen auf beiden APIs installieren.',
         actions: [
           'Die unten angezeigten Variablen in der serverseitigen .env der Tenant-API und der Runtime-API anlegen und die jeweiligen Schlüsselwerte einsetzen.',
+          'Danach „Schlüssel konfigurieren“ anklicken. Die Werte müssen in beiden APIs übereinstimmen; nur die Zuordnung wird verschlüsselt gespeichert.',
           'Im Deployment Secret-Variablen verwenden. Der aktuelle Adapter bietet keine HSM/KMS-Anbindung; Schlüssel niemals in NEXT_PUBLIC_-Variablen ablegen.',
         ],
         title: 'Schlüssel installieren',

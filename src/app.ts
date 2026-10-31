@@ -151,6 +151,16 @@ export async function createApp(
       {
         provide: RuntimeMongoService,
         useValue: options.runtimeMongo ?? {
+          keyStatus: async () => ({
+            available: false,
+            editable: false,
+            registered: false,
+            revision: null,
+            local: null,
+          }),
+          configureKeys: async () => {
+            throw new HttpException('Tenant key storage unavailable', 503);
+          },
           status: async () => ({
             configured: false,
             editable: false,

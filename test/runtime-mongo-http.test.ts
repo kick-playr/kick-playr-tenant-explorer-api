@@ -19,6 +19,14 @@ test('fixed MongoDB save route requires authentication and passes only path scop
     requiresReload: true,
   };
   const mongo = {
+    configureKeys: async (scope: unknown, body: unknown, actor: any) => {
+      assert.deepEqual(scope, { environment: 'development', tenantId: 'demo' });
+      assert.deepEqual(body, { expectedRevision: 'a'.repeat(64) });
+      assert.equal(actor.issuer, 'https://platform.example');
+      assert.equal(actor.subject, 'operator');
+      assert.ok(actor.expiresAt > Date.now());
+      return { registered: true };
+    },
     save: async (scope: unknown, body: unknown, actor: unknown) => {
       called++;
       assert.deepEqual(scope, { environment: 'development', tenantId: 'demo' });
@@ -50,6 +58,10 @@ test('fixed MongoDB save route requires authentication and passes only path scop
       .post(path)
       .send({ uri: 'PRIVATE_URI', expectedRevision: 'a'.repeat(64) })
       .expect(401);
+    await http
+      .post(path.replace('mongo-url', 'configure-keys'))
+      .send({ expectedRevision: 'a'.repeat(64) })
+      .expect(401);
     assert.equal(called, 0);
     // Adapter/controller contract only; production live Clerk guard is tested by
     // the unauthorized request above and the existing identity/session suites.
@@ -63,6 +75,10 @@ test('fixed MongoDB save route requires authentication and passes only path scop
       .post(path)
       .send({ uri: 'PRIVATE_URI', expectedRevision: 'a'.repeat(64) })
       .expect(201);
+    await http
+      .post(path.replace('mongo-url', 'configure-keys'))
+      .send({ expectedRevision: 'a'.repeat(64) })
+      .expect(201, { registered: true });
     assert.equal(called, 1);
     assert.deepEqual(response.body, metadata);
     assert.ok(!JSON.stringify(response.body).includes('PRIVATE_URI'));

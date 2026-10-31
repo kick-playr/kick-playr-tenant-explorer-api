@@ -396,7 +396,8 @@ export class OnboardingService {
     if (
       !Object.prototype.hasOwnProperty.call(schemas, action) ||
       action === 'verify' ||
-      action === 'provisioning'
+      action === 'provisioning' ||
+      action === 'key-check'
     )
       throw new BadRequestException('Ungültiger Einrichtungsschritt');
     const input = parse<unknown>(schemas[action], body) as Record<
