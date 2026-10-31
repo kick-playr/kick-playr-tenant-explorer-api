@@ -33,6 +33,13 @@ import { TenantService } from './tenant.service.js';
 import { CredentialVault } from './vault.js';
 import { KeyFileRegistry } from './key-files.js';
 
+import { InvitationService } from './invitations/service.js';
+import {
+  PlatformInvitationsController,
+  ClubInvitationsController,
+  AcceptanceController,
+  InvitationPlatformGuard,
+} from './invitations/controller.js';
 @Catch()
 class SafeExceptionFilter implements ExceptionFilter {
   catch(error: unknown, host: ArgumentsHost) {
@@ -87,16 +94,49 @@ export interface AppOptions {
   auth: PlatformAuthOptions;
   logger?: false;
   keyFiles?: KeyFileRegistry;
+  invitations?: InvitationService;
 }
 export async function createApp(
   options: AppOptions,
 ): Promise<INestApplication> {
   @Module({
     imports: [ThrottlerModule.forRoot([{ ttl: 60000, limit: 120 }])],
-    controllers: [TenantController, HealthController],
+    controllers: [
+      TenantController,
+      HealthController,
+      PlatformInvitationsController,
+      ClubInvitationsController,
+      AcceptanceController,
+    ],
     providers: [
       { provide: AUTH_OPTIONS, useValue: options.auth },
       PlatformGuard,
+      InvitationPlatformGuard,
+      {
+        provide: InvitationService,
+        useValue:
+          options.invitations ??
+          new Proxy(
+            {},
+            {
+              get: (_target, key) =>
+                [
+                  'create',
+                  'list',
+                  'resend',
+                  'revoke',
+                  'deliver',
+                  'preview',
+                  'accept',
+                  'status',
+                ].includes(String(key))
+                  ? () => {
+                      throw new HttpException('Invitations unavailable', 503);
+                    }
+                  : undefined,
+            },
+          ),
+      },
       { provide: 'REPOSITORY', useValue: options.repository },
       {
         provide: TenantService,
@@ -128,6 +168,7 @@ export async function createApp(
   app.use(helmet());
   app.use((_req: unknown, res: Response, next: () => void) => {
     res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Referrer-Policy', 'no-referrer');
     next();
   });
   app.use(json({ limit: '64kb' }));
@@ -139,7 +180,7 @@ export async function createApp(
       .setDescription(
         'Platform administration. Requires an allowlisted Clerk session. Explorer integration records do not provision external providers.',
       )
-      .setVersion('0.1.0')
+      .setVersion('0.1.1')
       .addBearerAuth()
       .build(),
   );
