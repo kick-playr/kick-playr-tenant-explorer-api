@@ -1,3 +1,4 @@
+import { RuntimeMongoService } from '../runtime-mongo.js';
 import {
   Body,
   Controller,
@@ -113,6 +114,7 @@ export class ProvisioningController {
     @Inject(OnboardingService) private readonly service: OnboardingService,
     @Inject(TenantService) private readonly tenants: TenantService,
     @Inject(AUTH_OPTIONS) private readonly auth: PlatformAuthOptions,
+    @Inject(RuntimeMongoService) private readonly mongo: RuntimeMongoService,
   ) {}
   @Get()
   @UseGuards(PlatformGuard)
@@ -126,11 +128,24 @@ export class ProvisioningController {
     return {
       ...guide,
       keys,
+      mongo: await this.mongo.status(s),
       environmentSnippet: [
         ...variables.map((v) => v + '=<32-Byte-Schlüssel in Base64>'),
-        'MANAGER_SETUP_CONTROL_KEY=<separater gemeinsamer Setup-Schlüssel für beide APIs>',
       ].join('\n'),
     };
+  }
+  @Post('mongo-url')
+  @UseGuards(InvitationPlatformGuard)
+  saveMongo(
+    @Param('environment') e: string,
+    @Param('tenantId') t: string,
+    @Req() req: PlatformRequest,
+    @Body() body: unknown,
+  ) {
+    return this.mongo.save(scope(e, t), body, {
+      subject: req.platformSubject,
+      expiresAt: req.platformExpiresAt,
+    });
   }
   @Post('save')
   @UseGuards(InvitationPlatformGuard)
@@ -142,7 +157,11 @@ export class ProvisioningController {
   ) {
     return this.service.saveProvisioning(
       scope(e, t),
-      { issuer: this.auth.issuer, subject: req.platformSubject, expiresAt:req.platformExpiresAt },
+      {
+        issuer: this.auth.issuer,
+        subject: req.platformSubject,
+        expiresAt: req.platformExpiresAt,
+      },
       body,
     );
   }
@@ -157,7 +176,8 @@ export class ProvisioningController {
     parse(z.strictObject({}), body);
     return this.service.verifyProvisioning(scope(e, t), {
       issuer: this.auth.issuer,
-      subject: req.platformSubject, expiresAt:req.platformExpiresAt,
+      subject: req.platformSubject,
+      expiresAt: req.platformExpiresAt,
     });
   }
 }

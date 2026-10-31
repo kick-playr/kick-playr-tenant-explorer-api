@@ -1,3 +1,4 @@
+import { RuntimeMongoService } from './runtime-mongo.js';
 import 'dotenv/config';
 import { createApp } from './app.js';
 import { MongoRepository } from './repository.js';
@@ -71,7 +72,7 @@ async function bootstrap() {
     bindings,
     identity,
     new SetupRuntime(
-      config.setupRuntimes??config.clubRuntimes,
+      config.setupRuntimes ?? config.clubRuntimes,
       process.env.MANAGER_SETUP_CONTROL_KEY,
     ),
     sender,
@@ -85,6 +86,12 @@ async function bootstrap() {
       repository: new MongoRepository(client, database),
       vault,
       onboarding,
+      runtimeMongo: new RuntimeMongoService(
+        client,
+        database,
+        Buffer.from(rootText, 'base64'),
+        required('EXPLORER_MONGODB_URI'),
+      ),
       invitations: new InvitationService(
         invitationRepository,
         bindings,

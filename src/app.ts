@@ -1,3 +1,4 @@
+import { RuntimeMongoService } from './runtime-mongo.js';
 import 'reflect-metadata';
 import {
   Catch,
@@ -120,6 +121,7 @@ export interface AppOptions {
   publicRealms?: PublicRealmDirectory;
   invitations?: InvitationService;
   onboarding?: OnboardingService;
+  runtimeMongo?: RuntimeMongoService;
 }
 export async function createApp(
   options: AppOptions,
@@ -146,6 +148,25 @@ export async function createApp(
       },
       PlatformGuard,
       InvitationPlatformGuard,
+      {
+        provide: RuntimeMongoService,
+        useValue: options.runtimeMongo ?? {
+          status: async () => ({
+            configured: false,
+            editable: false,
+            available: false,
+            revision: null,
+            source: null,
+            requiresReload: false,
+          }),
+          save: async () => {
+            throw new HttpException(
+              'MongoDB configuration storage unavailable',
+              503,
+            );
+          },
+        },
+      },
       {
         provide: OnboardingService,
         useValue:
