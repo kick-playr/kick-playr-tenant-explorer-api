@@ -3,6 +3,8 @@ import {
   Catch,
   Controller,
   Get,
+  Inject,
+  Query,
   HttpException,
   Module,
   type ArgumentsHost,
@@ -25,6 +27,7 @@ import helmet from 'helmet';
 import {
   AUTH_OPTIONS,
   PlatformGuard,
+  ExplorerSessionGuard,
   type PlatformAuthOptions,
 } from './auth.js';
 import type { Repository } from './repository.js';
@@ -32,6 +35,10 @@ import { TenantController } from './tenant.controller.js';
 import { TenantService } from './tenant.service.js';
 import { CredentialVault } from './vault.js';
 import { KeyFileRegistry } from './key-files.js';
+import { ClubAccess } from './club-access.js';
+import { ClubRuntime } from './club-runtime.js';
+import { ClubController, ExplorerAccessController } from './club.controller.js';
+import { PublicRealmDirectory } from './public-realms.js';
 
 @Catch()
 class SafeExceptionFilter implements ExceptionFilter {
@@ -80,6 +87,12 @@ class HealthController {
     return { status: 'ok', service: 'tenant-explorer-api' };
   }
 }
+@Controller('public')
+class PublicRealmController {
+  constructor(@Inject(PublicRealmDirectory) private readonly realms:PublicRealmDirectory) {}
+  @Get('realm')
+  realm(@Query() query:Record<string,unknown>) {return this.realms.resolve(query);}
+}
 
 export interface AppOptions {
   repository: Repository;
@@ -87,16 +100,34 @@ export interface AppOptions {
   auth: PlatformAuthOptions;
   logger?: false;
   keyFiles?: KeyFileRegistry;
+  clubRuntime?: ClubRuntime;
+  publicRealms?: PublicRealmDirectory;
 }
 export async function createApp(
   options: AppOptions,
 ): Promise<INestApplication> {
   @Module({
     imports: [ThrottlerModule.forRoot([{ ttl: 60000, limit: 120 }])],
-    controllers: [TenantController, HealthController],
+    controllers: [
+      TenantController,
+      HealthController,
+      ClubController,
+      ExplorerAccessController,
+      PublicRealmController,
+    ],
     providers: [
       { provide: AUTH_OPTIONS, useValue: options.auth },
+      {provide:PublicRealmDirectory,useValue:options.publicRealms??new PublicRealmDirectory()},
       PlatformGuard,
+      ExplorerSessionGuard,
+      {
+        provide: ClubAccess,
+        useFactory: () => new ClubAccess(options.repository),
+      },
+      {
+        provide: ClubRuntime,
+        useValue: options.clubRuntime ?? new ClubRuntime(),
+      },
       { provide: 'REPOSITORY', useValue: options.repository },
       {
         provide: TenantService,
@@ -137,7 +168,7 @@ export async function createApp(
     new DocumentBuilder()
       .setTitle('Kick Playr Tenant Explorer API')
       .setDescription(
-        'Platform administration. Requires an allowlisted Clerk session. Explorer integration records do not provision external providers.',
+        'Platform routes require an allowlisted platform Clerk session. Club routes require exact active tenant administrator grants and use the existing authenticated club runtime and encrypted storage.',
       )
       .setVersion('0.1.0')
       .addBearerAuth()

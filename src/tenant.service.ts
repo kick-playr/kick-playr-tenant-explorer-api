@@ -9,6 +9,7 @@ import {
   credentialSchema,
   emptyMetadata,
   environmentSchema,
+  grantRevisionSchema,
   identifier,
   integrationSchema,
   listSchema,
@@ -25,6 +26,7 @@ import {
 import type { Repository } from './repository.js';
 import { CredentialVault } from './vault.js';
 import { KeyFileRegistry } from './key-files.js';
+import { expandTenantPermissions } from './tenant-permissions.js';
 
 export class TenantService {
   constructor(
@@ -154,6 +156,7 @@ export class TenantService {
     action: string,
     edit: (a: Aggregate) => void,
     resource?: string,
+    expectedAuthorityRevision?: number,
   ) {
     this.key(environment, id);
     return this.repository.transaction(async (tx) => {
@@ -162,6 +165,13 @@ export class TenantService {
       if (aggregate.definition.configRevision !== expected)
         throw new ConflictException('Tenant changed; reload before saving');
       if (
+        expectedAuthorityRevision !== undefined &&
+        aggregate.authority?.authorityRevision !== expectedAuthorityRevision
+      )
+        throw new ConflictException(
+          'Tenant user access changed; reload before saving',
+        );
+      if (
         expected >= Number.MAX_SAFE_INTEGER - 1 ||
         (aggregate.authority?.authorityRevision ?? 0) >=
           Number.MAX_SAFE_INTEGER - 1
@@ -169,7 +179,9 @@ export class TenantService {
         throw new ConflictException('Tenant revision exhausted');
       edit(aggregate);
       this.hosts(aggregate.definition);
-      aggregate.definition.configRevision++;
+      // Grant generations revoke access without rebinding encrypted club data.
+      if (expectedAuthorityRevision === undefined)
+        aggregate.definition.configRevision++;
       const authority = aggregate.authority;
       if (!authority)
         throw new BadRequestException(
@@ -247,7 +259,11 @@ export class TenantService {
     body: unknown,
     actor: string,
   ) {
-    const { expectedRevision, ...user } = parse(userSchema, body);
+    const { expectedRevision, expectedAuthorityRevision, ...user } = parse(
+      userSchema,
+      body,
+    );
+    user.permissions = expandTenantPermissions(user.permissions);
     if (subject !== user.subject)
       throw new BadRequestException('User subject must match route');
     return this.mutate(
@@ -274,6 +290,7 @@ export class TenantService {
         else a.authority.users.push(grant);
       },
       subject,
+      expectedAuthorityRevision ?? expectedRevision,
     );
   }
   async revokeUser(
@@ -283,7 +300,10 @@ export class TenantService {
     body: unknown,
     actor: string,
   ) {
-    const { expectedRevision } = parse(revisionSchema, body);
+    const { expectedRevision, expectedAuthorityRevision } = parse(
+      grantRevisionSchema,
+      body,
+    );
     return this.mutate(
       environment,
       id,
@@ -300,6 +320,7 @@ export class TenantService {
         user.revision++;
       },
       subject,
+      expectedAuthorityRevision ?? expectedRevision,
     );
   }
   async putCredential(

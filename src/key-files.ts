@@ -1,11 +1,7 @@
-import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
-import { basename, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { environmentSchema, identifier } from './contracts.js';
 
-const pathSchema = z.string().min(1).max(4096).refine(isAbsolute);
 const variableSchema = z
   .string()
   .max(128)
@@ -20,24 +16,14 @@ const identityFields = {
   version: z.string().min(1).max(64),
   profile: z.string().min(1).max(64),
 };
-const bindingSchema = z.union([
-  z.strictObject({
-    ...identityFields,
-    files: z.strictObject({
-      wrapping: pathSchema,
-      index: pathSchema,
-      control: pathSchema,
-    }),
+const bindingSchema = z.strictObject({
+  ...identityFields,
+  variables: z.strictObject({
+    wrapping: variableSchema,
+    index: variableSchema,
+    control: variableSchema,
   }),
-  z.strictObject({
-    ...identityFields,
-    variables: z.strictObject({
-      wrapping: variableSchema,
-      index: variableSchema,
-      control: variableSchema,
-    }),
-  }),
-]);
+});
 const configSchema = z.strictObject({
   version: z.literal(1),
   bindings: z.array(bindingSchema).max(256),
@@ -67,21 +53,7 @@ export interface KeyFilesView {
   version?: string;
   files: KeyFileInfo[];
 }
-function privateMode(stat: {
-  mode: number;
-  uid: number;
-  nlink: number;
-  isFile(): boolean;
-}) {
-  return (
-    stat.isFile() &&
-    stat.nlink === 1 &&
-    (process.platform === 'win32' ||
-      ((stat.mode & 0o077) === 0 && stat.uid === process.getuid?.()))
-  );
-}
-
-/** Explicit server-owned paths only. HTTP inputs can select a tenant, never a file. */
+/** Database-owned environment key references. Never reads configuration or key files. */
 export class KeyFileRegistry {
   private readonly bindings: KeyBinding[];
   constructor(
@@ -103,40 +75,10 @@ export class KeyFileRegistry {
     if (new Set(identities).size !== identities.length)
       throw new Error('Duplicate explorer key-file binding');
   }
-  static async load(
-    path: string | undefined,
-    database: string,
-    env: NodeJS.ProcessEnv = process.env,
-  ): Promise<KeyFileRegistry> {
-    if (env.EXPLORER_KEY_BINDINGS_JSON) {
-      try {
-        const text = env.EXPLORER_KEY_BINDINGS_JSON;
-        if (Buffer.byteLength(text) > 131072) throw new Error();
-        const config = configSchema.parse(JSON.parse(text));
-        return new KeyFileRegistry(config.bindings, database, env);
-      } catch {
-        throw new Error(
-          'Explorer key environment bindings are unavailable or invalid',
-        );
-      }
-    }
-    if (!path) return new KeyFileRegistry([], database, env);
-    let file;
-    try {
-      if (!isAbsolute(path)) throw new Error();
-      file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-      const stat = await file.stat();
-      if (!privateMode(stat) || stat.size > 131072) throw new Error();
-      const parsed = configSchema.safeParse(
-        JSON.parse(await file.readFile('utf8')),
-      );
-      if (!parsed.success) throw new Error();
-      return new KeyFileRegistry(parsed.data.bindings, database, env);
-    } catch {
-      throw new Error('Explorer key-file bindings are unavailable or invalid');
-    } finally {
-      await file?.close();
-    }
+  static async load(): Promise<never> {
+    throw new Error(
+      'Explorer bindings must be loaded from encrypted database configuration',
+    );
   }
   async describe(tenant: KeyTenant): Promise<KeyFilesView> {
     const reference = tenant.secretReferences.key;
@@ -150,9 +92,7 @@ export class KeyFileRegistry {
     if (!binding) return { reference, status: 'unbound', files: [] };
     const files = await Promise.all(
       (['wrapping', 'index', 'control'] as const).map((kind) =>
-        'variables' in binding
-          ? this.inspectVariable(kind, binding.variables[kind])
-          : this.inspect(kind, binding.files[kind]),
+        this.inspectVariable(kind, binding.variables[kind]),
       ),
     );
     return {
@@ -187,49 +127,6 @@ export class KeyFileRegistry {
       };
     } finally {
       bytes?.fill(0);
-    }
-  }
-  private async inspect(
-    kind: KeyFileInfo['kind'],
-    path: string,
-  ): Promise<KeyFileInfo> {
-    const info = {
-      kind,
-      source: 'file' as const,
-      path,
-      filename: basename(path),
-    };
-    let file;
-    const bytes = Buffer.alloc(33);
-    try {
-      file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-      const stat = await file.stat();
-      if (!privateMode(stat)) return { ...info, status: 'insecure' };
-      if (stat.size !== 32) return { ...info, status: 'invalid' };
-      const read = await file.read(bytes, 0, 33, 0);
-      if (read.bytesRead !== 32) return { ...info, status: 'invalid' };
-      return {
-        ...info,
-        status: 'available',
-        bytes: 32,
-        fingerprint: createHash('sha256')
-          .update(bytes.subarray(0, 32))
-          .digest('hex'),
-      };
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      return {
-        ...info,
-        status:
-          code === 'ENOENT'
-            ? 'missing'
-            : code === 'ELOOP'
-              ? 'insecure'
-              : 'unreadable',
-      };
-    } finally {
-      bytes.fill(0);
-      await file?.close();
     }
   }
 }

@@ -111,7 +111,10 @@ test('user changes increment grant generations and revoke instead of deleting hi
     'development',
     'winikon',
     'user_member',
-    { expectedRevision: 2 },
+    {
+      expectedRevision: view.configRevision,
+      expectedAuthorityRevision: view.authorityRevision,
+    },
     actor,
   );
   assert.equal(view.users[0]?.status, 'revoked');
@@ -276,7 +279,7 @@ test('cannot change the issuer while retained grants would violate the runtime c
     'development',
     'winikon',
     'user_member',
-    { expectedRevision: 2 },
+    { expectedRevision: 1, expectedAuthorityRevision: 2 },
     actor,
   );
   await assert.rejects(
@@ -284,11 +287,137 @@ test('cannot change the issuer while retained grants would violate the runtime c
       'development',
       'winikon',
       {
-        expectedRevision: 3,
+        expectedRevision: 1,
         identityRealm: 'https://other.clerk.accounts.dev',
       },
       actor,
     ),
     /grant|migration/i,
   );
+});
+
+test('wildcard grants expand to concrete club permissions without platform privileges or foreign-tenant changes', async () => {
+  const { service, repository } = fixture();
+  await service.create(input(), actor);
+  await service.create(input('uster'), actor);
+  const result = await service.putUser(
+    'development',
+    'winikon',
+    'user_admin',
+    {
+      expectedRevision: 1,
+      issuer: input().identityRealm,
+      subject: 'user_admin',
+      contactId: 23,
+      status: 'active',
+      permissions: ['club:*:*', 'club:settings:read'],
+    },
+    actor,
+  );
+  const permissions = result.users[0]!.permissions;
+  assert.ok(permissions.includes('club:settings:write'));
+  assert.ok(permissions.includes('club:actions:oauth:state'));
+  assert.ok(permissions.includes('club:integration-connections:manage'));
+  assert.ok(permissions.length > 10 && permissions.length <= 128);
+  assert.ok(
+    permissions.every((p) => p.startsWith('club:') && !p.includes('*')),
+  );
+  assert.equal(new Set(permissions).size, permissions.length);
+  assert.equal(
+    (await repository.read('development', 'uster'))?.authority?.users.length,
+    0,
+  );
+  await assert.rejects(
+    service.putUser(
+      'development',
+      'winikon',
+      'user_admin',
+      {
+        expectedRevision: 2,
+        issuer: input().identityRealm,
+        subject: 'user_admin',
+        contactId: 23,
+        status: 'active',
+        permissions: ['platform:*'],
+      },
+      actor,
+    ),
+  );
+  await assert.rejects(
+    service.putUser(
+      'development',
+      'winikon',
+      'user_admin',
+      {
+        expectedRevision: 2,
+        issuer: input().identityRealm,
+        subject: 'user_admin',
+        contactId: 23,
+        status: 'active',
+        permissions: ['club:*'],
+      },
+      actor,
+    ),
+  );
+});
+
+test('grant changes retain runtime configuration revision and reject stale administrator edits', async () => {
+  const { service } = fixture();
+  const created = await service.create(input(), actor);
+  const body = {
+    expectedRevision: created.configRevision,
+    expectedAuthorityRevision: created.authorityRevision,
+    issuer: input().identityRealm,
+    subject: 'user_admin',
+    contactId: 23,
+    status: 'active',
+    permissions: ['club:settings:read', 'club:settings:write'],
+  };
+  const granted = await service.putUser(
+    'development',
+    'winikon',
+    'user_admin',
+    body,
+    actor,
+  );
+  assert.equal(granted.configRevision, created.configRevision);
+  assert.equal(granted.authorityRevision, created.authorityRevision + 1);
+  await assert.rejects(
+    service.putUser('development', 'winikon', 'user_admin', body, actor),
+    /changed|reload/i,
+  );
+  const revoked = await service.revokeUser(
+    'development',
+    'winikon',
+    'user_admin',
+    {
+      expectedRevision: granted.configRevision,
+      expectedAuthorityRevision: granted.authorityRevision,
+    },
+    actor,
+  );
+  assert.equal(revoked.configRevision, created.configRevision);
+  assert.equal(revoked.users[0]?.status, 'revoked');
+});
+
+test('unscoped and platform wildcards are rejected', async () => {
+  const { service } = fixture();
+  await service.create(input(), actor);
+  for (const permission of ['*:*:*', 'platform:*:*'])
+    await assert.rejects(
+      service.putUser(
+        'development',
+        'winikon',
+        'user_admin',
+        {
+          expectedRevision: 1,
+          issuer: input().identityRealm,
+          subject: 'user_admin',
+          contactId: 23,
+          status: 'active',
+          permissions: [permission],
+        },
+        actor,
+      ),
+    );
 });

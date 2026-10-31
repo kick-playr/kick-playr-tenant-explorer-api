@@ -15,10 +15,9 @@ export interface Transaction {
   appendAudit(event: AuditEvent): Promise<void>;
 }
 export interface Repository {
+  clubDefinitions?(issuer: string, subject: string): Promise<Definition[]>;
   read(environment: string, id: string): Promise<Aggregate | null>;
-  list(
-    query: ListQuery,
-  ): Promise<{
+  list(query: ListQuery): Promise<{
     items: Definition[];
     total: number;
     page: number;
@@ -46,6 +45,40 @@ export class MongoRepository implements Repository {
   }
   private collection(name: keyof typeof names) {
     return this.client.db(this.databaseName).collection(names[name]);
+  }
+  async clubDefinitions(
+    issuer: string,
+    subject: string,
+  ): Promise<Definition[]> {
+    const rows = await this.collection('authorities')
+      .find(
+        {
+          schema: 1,
+          status: 'active',
+          identityRealm: issuer,
+          users: {
+            $elemMatch: {
+              issuer,
+              subject,
+              status: 'active',
+              permissions: {
+                $all: ['club:settings:read', 'club:settings:write'],
+              },
+            },
+          },
+        },
+        { projection: { tenantId: 1, environment: 1 }, maxTimeMS: 3000 },
+      )
+      .limit(101)
+      .toArray();
+    if (rows.length > 100)
+      throw new ServiceUnavailableException('Club directory limit exceeded');
+    const result: Definition[] = [];
+    for (const row of rows) {
+      const a = await this.read(row.environment, row.tenantId);
+      if (a) result.push(a.definition);
+    }
+    return result;
   }
   async onModuleInit() {
     await this.client.connect();

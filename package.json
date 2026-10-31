@@ -1,6 +1,6 @@
 {
   "name": "kick-playr-tenant-explorer-api",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "engines": {
@@ -11,29 +11,30 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/src/main.js",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test dist/test/*.test.js"
+    "test": "tsc && node --test dist/test/*.test.js",
+    "maint:update": "ncu -u -t minor && npm install && npm audit fix --audit-level moderate && npm install"
   },
   "dependencies": {
-    "@clerk/backend": "^3.26.2",
-    "@nestjs/common": "^12.2.0",
-    "@nestjs/core": "^12.2.0",
-    "@nestjs/platform-express": "^12.2.0",
-    "@nestjs/swagger": "^12.0.3",
+    "@clerk/backend": "^3.26.5",
+    "@nestjs/common": "^12.3.2",
+    "@nestjs/core": "^12.3.2",
+    "@nestjs/platform-express": "^12.3.2",
+    "@nestjs/swagger": "^12.0.5",
     "@nestjs/throttler": "^6.7.1",
     "dotenv": "^18.0.9",
     "helmet": "^8.3.0",
-    "mongodb": "^7.7.0",
+    "mongodb": "^7.8.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@nestjs/testing": "^12.2.0",
+    "@nestjs/testing": "^12.3.2",
     "@types/express": "^5.0.6",
     "@types/node": "^24.19.2",
     "@types/supertest": "^7.2.1",
     "supertest": "^7.3.1",
-    "tsx": "^4.20.0",
+    "tsx": "^4.23.15",
     "typescript": "^6.0.3"
   }
 }

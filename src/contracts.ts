@@ -44,6 +44,9 @@ export const revisionSchema = z.strictObject({
     .positive()
     .max(Number.MAX_SAFE_INTEGER - 1),
 });
+export const grantRevisionSchema = revisionSchema.extend({
+  expectedAuthorityRevision: revisionSchema.shape.expectedRevision.optional(),
+});
 const realm = z
   .string()
   .max(256)
@@ -137,7 +140,7 @@ export const updateSchema = z
   .refine((input) => Object.keys(input).length > 1, 'No changes supplied');
 export const userSchema = z
   .strictObject({
-    ...revisionSchema.shape,
+    ...grantRevisionSchema.shape,
     issuer: realm,
     subject: z
       .string()
@@ -150,7 +153,7 @@ export const userSchema = z
         z
           .string()
           .max(132)
-          .regex(/^club:[a-z][a-z0-9:._-]{0,127}$/),
+          .regex(/^(?:club:[a-z][a-z0-9:._-]{0,127}|club:\*:\*)$/),
       )
       .max(128),
     status: z.enum(['active', 'disabled', 'revoked']),
