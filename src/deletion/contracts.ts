@@ -1,6 +1,3 @@
-import { BadRequestException } from '@nestjs/common';
-import { createHash } from 'node:crypto';
-import { databaseLocation } from '../database-target.js';
 import { z } from 'zod';
 import {
   environmentSchema,
@@ -91,6 +88,7 @@ export interface DeletionStore {
 export interface Inventory {
   revision: string;
   complete: boolean;
+  controlOnly?: boolean;
   targets: { id: string; label: string }[];
   reason?: string;
 }
@@ -123,6 +121,9 @@ export const purgeSchema = operationSchema.extend({
     )
     .max(checklist.length),
   allDone: z.literal(true),
+  ownershipConfirmed: z.literal(true),
+  unregisteredResourcesConfirmed: z.literal(true),
+  controlOnly: z.boolean(),
   expectedInventoryRevision: z.string().min(1).max(128),
 });
 export function scopeKey(s: Scope) {
@@ -181,100 +182,4 @@ export function recoveryDeadline(iso: string): string {
     guess = next;
   }
   return new Date(guess).toISOString();
-}
-const targetSchema = z.strictObject({
-  id: identifier,
-  connectionVariable: z.string().regex(/^[A-Z][A-Z0-9_]{0,127}$/),
-  database: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/),
-  exclusive: z.literal(true),
-  evidence: z.string().trim().min(1).max(256),
-});
-const manifestSchema = z
-  .array(
-    z.strictObject({
-      environment: environmentSchema,
-      tenantId: identifier,
-      complete: z.literal(true),
-      revision: z.string().min(1).max(128),
-      targets: z.array(targetSchema).max(32),
-      scopedCollections: z
-        .array(z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,100}$/))
-        .max(64),
-    }),
-  )
-  .max(128);
-export type Manifest = z.infer<typeof manifestSchema>[number];
-export interface ResolvedManifest extends Manifest {
-  digest: string;
-  targets: (Manifest['targets'][number] & { uri: string; location: string })[];
-}
-export const location = databaseLocation;
-export function parseManifests(
-  input: unknown,
-  env: NodeJS.ProcessEnv,
-  control: string,
-): ResolvedManifest[] {
-  const all = manifestSchema.parse(input),
-    seen = new Set<string>(),
-    scopes = new Set<string>();
-  return all.map((m) => {
-    const key = scopeKey(m);
-    if (scopes.has(key))
-      throw new BadRequestException('Duplicate deletion manifest');
-    scopes.add(key);
-    const ids = new Set<string>();
-    const targets = m.targets.map((t) => {
-      if (
-        ['admin', 'local', 'config', control.toLowerCase()].includes(
-          t.database.toLowerCase(),
-        )
-      )
-        throw new BadRequestException(
-          'Protected database in deletion inventory',
-        );
-      const uri = env[t.connectionVariable];
-      if (!uri)
-        throw new BadRequestException(
-          'Deletion database connection unavailable',
-        );
-      const loc = location(uri, t.database);
-      if (seen.has(loc))
-        throw new BadRequestException(
-          'Shared database target in deletion inventory',
-        );
-      seen.add(loc);
-      if (ids.has(t.id))
-        throw new BadRequestException('Duplicate deletion target');
-      ids.add(t.id);
-      return { ...t, uri, location: loc };
-    });
-    const forbidden = [
-      'tenantDefinitions',
-      'tenantHostBindings',
-      'tenantRuntimeAuthorities',
-      'tenantExplorerConfiguration',
-      'tenantExplorerAudit',
-      'tenantManagerInvitations',
-      'tenantWorkflowConfiguration',
-      'tenantDeletionOperations',
-      'tenantDeletionTargets',
-      'tenantManagerSetupProofs',
-      'tenantApiKeys',
-      'tenantApiKeyManagers',
-    ];
-    if (
-      new Set(m.scopedCollections).size !== m.scopedCollections.length ||
-      m.scopedCollections.some((c) => forbidden.includes(c))
-    )
-      throw new BadRequestException('Invalid scoped cleanup inventory');
-    return {
-      ...m,
-      targets,
-      digest: createHash('sha256')
-        .update(
-          JSON.stringify({ ...m, targets: targets.map(({ uri, ...t }) => t) }),
-        )
-        .digest('hex'),
-    };
-  });
 }

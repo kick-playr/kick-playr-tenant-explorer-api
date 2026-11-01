@@ -1,3 +1,4 @@
+import { DeletionInventoryResolver } from './deletion/inventory.js';
 import { DeletionService } from './deletion/service.js';
 import { MongoDeletionStore, MongoPurgePort } from './deletion/mongo.js';
 import { RuntimeMongoService } from './runtime-mongo.js';
@@ -91,16 +92,26 @@ async function bootstrap() {
   let app: Awaited<ReturnType<typeof createApp>> | undefined;
   try {
     const deletionKey = Buffer.from(rootText, 'base64');
+    const deletionInventory = new DeletionInventoryResolver(
+      client,
+      database,
+      deletionKey,
+      vault,
+    );
     const purger = new MongoPurgePort(
       client,
       database,
       deletionKey,
-      JSON.parse(process.env.EXPLORER_DELETION_MANIFEST_JSON ?? '[]'),
-      process.env,
+      deletionInventory,
     );
     app = await createApp({
       deletion: new DeletionService(
-        new MongoDeletionStore(client, database, deletionKey, purger.manifests),
+        new MongoDeletionStore(
+          client,
+          database,
+          deletionKey,
+          deletionInventory,
+        ),
         purger,
       ),
       clubRuntime: new ClubRuntime(config.clubRuntimes),
