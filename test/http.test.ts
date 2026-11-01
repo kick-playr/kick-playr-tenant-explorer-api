@@ -183,3 +183,27 @@ test('unexpected storage errors are sanitized without leaking provider data', as
     await app.close();
   }
 });
+
+test('deletion status, soft delete, recovery and purge routes require platform admin session', async () => {
+  const { app, http } = await fixture();
+  try {
+    for (const suffix of ['', '/recover', '/purge']) {
+      const path =
+        '/api/platform/tenants/development/winikon/deletion' + suffix;
+      if (!suffix) await http.get(path).expect(401);
+      await http.post(path).send({}).expect(401);
+      await http
+        .post(path)
+        .set('Authorization', `Bearer ${token({ sub: 'user_member' })}`)
+        .send({})
+        .expect(403);
+      await http
+        .post(path)
+        .set('Authorization', `Bearer ${token()}`)
+        .send({})
+        .expect(503);
+    }
+  } finally {
+    await app.close();
+  }
+});

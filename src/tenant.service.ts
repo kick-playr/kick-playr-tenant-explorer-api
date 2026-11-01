@@ -45,6 +45,7 @@ export class TenantService {
       hostname: d.hostname,
       aliases: [...d.aliases],
       status: d.status,
+      ...(d.deletionId ? { deletionId: d.deletionId } : {}),
       configRevision: d.configRevision,
       public: { name: d.public.name, locale: d.public.locale },
       secretReferences: {
@@ -162,6 +163,10 @@ export class TenantService {
     return this.repository.transaction(async (tx) => {
       const aggregate = await tx.read(environment, id);
       if (!aggregate) throw new NotFoundException('Tenant not found');
+      if (aggregate.definition.deletionId)
+        throw new ConflictException(
+          'Tenant is marked for deletion; use the deletion workflow',
+        );
       if (aggregate.definition.configRevision !== expected)
         throw new ConflictException('Tenant changed; reload before saving');
       if (

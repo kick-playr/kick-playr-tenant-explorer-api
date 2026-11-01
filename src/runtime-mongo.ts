@@ -1,3 +1,4 @@
+import { fenceDatabaseAssignment } from './database-target.js';
 import {
   BadRequestException,
   ConflictException,
@@ -762,6 +763,13 @@ export class RuntimeMongoService {
               'Use a distinct tenant database on the configured TLS runtime cluster with its configured credentials and authSource',
             );
           }
+          await fenceDatabaseAssignment(
+            this.client,
+            this.database,
+            input.uri,
+            cluster(input.uri).database,
+            session,
+          );
           const pending = root.pending.filter((t) => t.tenantId !== s.tenantId);
           if (existing) existing.mongoUri = input.uri;
           else pending.push({ tenantId: s.tenantId, mongoUri: input.uri });

@@ -41,6 +41,7 @@ export class MongoInvitationRepository implements InvitationRepository {
             );
           if (
             !definition ||
+            definition.deletionId ||
             !authority ||
             definition.configRevision !== authority.configRevision
           )

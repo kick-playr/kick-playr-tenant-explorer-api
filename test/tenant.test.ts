@@ -421,3 +421,23 @@ test('unscoped and platform wildcards are rejected', async () => {
       ),
     );
 });
+
+test('generic edits cannot reactivate deletion tombstones', async () => {
+  const f = fixture();
+  await f.service.create(input(), actor);
+  f.repository.rows.get('development/winikon')!.definition.deletionId =
+    'deletion-operation';
+  await assert.rejects(
+    f.service.update(
+      'development',
+      'winikon',
+      { expectedRevision: 1, status: 'active' },
+      actor,
+    ),
+    /deletion/i,
+  );
+  assert.equal(
+    (await f.repository.read('development', 'winikon'))!.definition.status,
+    'provisioning',
+  );
+});
