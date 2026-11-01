@@ -30,7 +30,7 @@ export class TenantController {
   @Get(':environment/:id/keys')
   @ApiOperation({
     summary:
-      'Inspect configured tenant key files; returns paths, availability and SHA-256 fingerprints, never key values',
+      'Inspect configured tenant key sources and loaded version metadata, never key values',
   })
   keys(@Param('environment') environment: string, @Param('id') id: string) {
     return this.service.keyFiles(environment, id);

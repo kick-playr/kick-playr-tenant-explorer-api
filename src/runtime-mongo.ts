@@ -1,3 +1,4 @@
+import type { TenantKeySource } from './secrets.js';
 import { fenceDatabaseAssignment } from './database-target.js';
 import {
   BadRequestException,
@@ -119,6 +120,7 @@ export class RuntimeMongoService {
     private readonly controlUri: string,
     private readonly environment: NodeJS.ProcessEnv = process.env,
     private readonly keyRuntime?: SetupRuntimePort,
+    private readonly secretSource?: TenantKeySource,
   ) {
     if (key.length !== 32 || !/^[A-Za-z0-9_-]{1,63}$/.test(database))
       throw unavailable();
@@ -247,6 +249,7 @@ export class RuntimeMongoService {
     return {
       configured: source !== null,
       editable:
+        this.secretSource?.strategy !== 'LOCAL_KEYVAULT' &&
         tenant.editable &&
         tenant.definition.secretReferences?.mongoUri ===
           `workflow-local:${s.tenantId}:mongo`,
@@ -357,13 +360,35 @@ export class RuntimeMongoService {
       this.database,
       explorer.keyBindings.bindings,
     );
-    new KeyFileRegistry(bindings, this.database, this.environment);
-    return bindings;
+    new KeyFileRegistry(
+      bindings,
+      this.database,
+      this.environment,
+      undefined,
+      this.secretSource,
+    );
+    return bindings.map((binding) => {
+      // Legacy env metadata uses v1; a vault snapshot owns the selected
+      // application wrapping generation. Never relabel its bytes as v1.
+      try {
+        return this.sourceBinding(binding);
+      } catch {
+        return binding;
+      }
+    });
+  }
+  private sourceBinding(binding: KeyBinding, revision?: number): KeyBinding {
+    if (this.secretSource?.strategy !== 'LOCAL_KEYVAULT') return binding;
+    return {
+      ...binding,
+      version: this.secretSource.describe(binding, revision).version,
+    };
   }
   private candidate(
     s: Scope,
     root: Awaited<ReturnType<RuntimeMongoService['root']>>,
     tenant: Awaited<ReturnType<RuntimeMongoService['tenant']>>,
+    metadataOnly = false,
   ): KeyBinding {
     const reference = tenant.definition.secretReferences?.key;
     if (
@@ -391,9 +416,18 @@ export class RuntimeMongoService {
         control: `${prefix}_CONTROL_KEY`,
       },
     };
-    if (binding.version !== 'v1' || binding.profile !== root.payload.profile)
+    if (
+      (this.secretSource?.strategy !== 'LOCAL_KEYVAULT' &&
+        binding.version !== 'v1') ||
+      binding.profile !== root.payload.profile
+    )
       throw new BadRequestException('Tenant key adapter unavailable');
-    return binding;
+    try {
+      return this.sourceBinding(binding, tenant.definition.configRevision);
+    } catch (error) {
+      if (metadataOnly) return binding;
+      throw error;
+    }
   }
   async keyStatus(s: Scope) {
     this.scope(s);
@@ -408,10 +442,20 @@ export class RuntimeMongoService {
       };
     const root = await this.root({ maxTimeMS: 3000 }),
       tenant = await this.tenant(s, { maxTimeMS: 3000 }),
-      binding = this.candidate(s, root, tenant);
+      binding = this.candidate(s, root, tenant, true);
+    const local = await new KeyFileRegistry(
+      [binding],
+      this.database,
+      this.environment,
+      undefined,
+      this.secretSource,
+    ).describe(tenant.definition as any);
+    const ready =
+      this.secretSource?.strategy !== 'LOCAL_KEYVAULT' ||
+      local.status === 'connected';
     return {
-      available: !!this.keyRuntime,
-      editable: tenant.editable && !!this.keyRuntime,
+      available: !!this.keyRuntime && ready,
+      editable: tenant.editable && !!this.keyRuntime && ready,
       registered: this.bindings(root).some(
         (b) =>
           b.tenantId === s.tenantId &&
@@ -420,11 +464,7 @@ export class RuntimeMongoService {
           b.keyReference === binding.keyReference,
       ),
       revision: this.revision(root.row),
-      local: await new KeyFileRegistry(
-        [binding],
-        this.database,
-        this.environment,
-      ).describe(tenant.definition as any),
+      local,
       onboardingRevision: tenant.invitations?.revision ?? 0,
     };
   }
@@ -435,6 +475,10 @@ export class RuntimeMongoService {
     expiresAt: number,
     others: KeyBinding[] = [],
   ) {
+    const keyEnvironment =
+      this.secretSource?.strategy === 'LOCAL_KEYVAULT'
+        ? this.secretSource.tenantEnvironment(binding, configRevision)
+        : this.environment;
     const owned: Buffer[] = [],
       transport = Buffer.from(
         this.environment.MANAGER_SETUP_CONTROL_KEY ?? '',
@@ -442,7 +486,7 @@ export class RuntimeMongoService {
       );
     try {
       for (const kind of KEY_KINDS) {
-        const value = this.environment[binding.variables[kind]],
+        const value = keyEnvironment[binding.variables[kind]],
           key = Buffer.from(value ?? '', 'base64');
         owned.push(key);
         const suffix = {
@@ -459,7 +503,7 @@ export class RuntimeMongoService {
           owned.slice(0, -1).some((other) => other.equals(key))
         )
           throw new BadRequestException(
-            'Three valid independent tenant keys are required in this API environment',
+            'Three valid independent tenant keys are required in the selected server source',
           );
       }
       for (const other of others.filter(
@@ -468,8 +512,12 @@ export class RuntimeMongoService {
           other.controlDatabase === binding.controlDatabase &&
           other.tenantId !== binding.tenantId,
       )) {
+        const otherEnvironment =
+          this.secretSource?.strategy === 'LOCAL_KEYVAULT'
+            ? this.secretSource.tenantEnvironment(other)
+            : this.environment;
         for (const name of Object.values(other.variables)) {
-          const bytes = Buffer.from(this.environment[name] ?? '', 'base64');
+          const bytes = Buffer.from(otherEnvironment[name] ?? '', 'base64');
           try {
             if (owned.some((key) => key.equals(bytes)))
               throw new BadRequestException(
@@ -641,7 +689,11 @@ export class RuntimeMongoService {
               'version',
               'profile',
             ].some(
-              (field) => previous[field] !== binding[field as keyof KeyBinding],
+              (field) =>
+                !(
+                  field === 'version' &&
+                  this.secretSource?.strategy === 'LOCAL_KEYVAULT'
+                ) && previous[field] !== binding[field as keyof KeyBinding],
             ) ||
               KEY_KINDS.some(
                 (kind) => previous.variables[kind] !== binding.variables[kind],
@@ -649,6 +701,8 @@ export class RuntimeMongoService {
           )
             throw conflict();
           if (!previous) explorer.keyBindings.bindings.push(binding);
+          else if (this.secretSource?.strategy === 'LOCAL_KEYVAULT')
+            previous.version = binding.version;
           this.bindings(root);
           const result = await this.persist(
             s,
@@ -669,6 +723,8 @@ export class RuntimeMongoService {
               [binding],
               this.database,
               this.environment,
+              undefined,
+              this.secretSource,
             ).describe(current.definition as any),
           };
         },
@@ -690,6 +746,10 @@ export class RuntimeMongoService {
   ): Promise<MongoConfigurationStatus> {
     this.scope(s);
     this.active();
+    if (this.secretSource?.strategy === 'LOCAL_KEYVAULT')
+      throw new BadRequestException(
+        'Store MongoDB credentials in the vault and restart the application',
+      );
     const input = parse(inputSchema, body);
     if (s.environment !== 'development')
       throw new BadRequestException(

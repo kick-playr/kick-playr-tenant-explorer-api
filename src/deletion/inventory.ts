@@ -180,6 +180,8 @@ export class DeletionInventoryResolver {
     private readonly database: string,
     private readonly key: Buffer,
     private readonly vault: CredentialVault,
+    private readonly secretsStrategy:
+      'ENV_VARIABLES' | 'LOCAL_KEYVAULT' = 'ENV_VARIABLES',
   ) {}
   private collection(name: string) {
     return this.client.db(this.database).collection<Document>(name);
@@ -192,6 +194,10 @@ export class DeletionInventoryResolver {
     };
   }
   private async current(s: Scope, session?: ClientSession) {
+    if (this.secretsStrategy === 'LOCAL_KEYVAULT')
+      throw new ConflictException(
+        'Vault-backed deletion inventory requires reviewed versioned credential references; legacy credential cleanup is unavailable',
+      );
     if (s.environment !== 'development')
       throw new ConflictException(
         'Registered database cleanup is unsupported for this environment',

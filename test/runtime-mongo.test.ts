@@ -12,7 +12,7 @@ import {
 const control = 'app-local-real-control-kick-playr-ch';
 const uri = (db: string) =>
   `mongodb://user:PRIVATE_PASSWORD@cluster.invalid/${db}?tls=true&authSource=admin`;
-function fixture(registered = false) {
+function fixture(registered = false, secretSource?: any) {
   const key = randomBytes(32),
     scope = { environment: 'development', tenantId: 'demo' },
     actor = { subject: 'operator', expiresAt: Date.now() + 60000 };
@@ -189,6 +189,7 @@ function fixture(registered = false) {
     uri(control),
     environment,
     runtime,
+    secretSource,
   );
   const plain = () =>
     decodeRuntimeEnvelope(
@@ -596,6 +597,100 @@ test('assignment and purge reservation write the same location fence; a competin
       ),
       /reserved/i,
     );
+  } finally {
+    f.service.onModuleDestroy();
+  }
+});
+
+test('vault mode refuses storing raw MongoDB credentials and gates key proofs on loaded generation', async () => {
+  const source = {
+    strategy: 'LOCAL_KEYVAULT' as const,
+    tenantEnvironment: () => {
+      throw Error('Tenant secrets require application restart');
+    },
+    describe: () => {
+      throw Error('restart');
+    },
+  };
+  const f = fixture(false, source);
+  try {
+    const status = await f.service.keyStatus(f.scope);
+    assert.equal(status.editable, false);
+    assert.equal(status.local?.requiresRestart, true);
+    await assert.rejects(
+      f.service.save(
+        f.scope,
+        { uri: uri('demo'), expectedRevision: 'a'.repeat(64) },
+        f.actor,
+      ),
+      /vault/i,
+    );
+    const setup = await f.service.status(f.scope);
+    await assert.rejects(
+      f.service.configureKeys(
+        f.scope,
+        { expectedRevision: setup.revision },
+        { ...f.actor, issuer: 'issuer' },
+      ),
+      /restart/i,
+    );
+  } finally {
+    f.service.onModuleDestroy();
+  }
+});
+
+test('vault key registration preserves the selected current application wrapping version instead of relabeling v2 as v1', async () => {
+  let environment: Record<string, string>;
+  const source = {
+    strategy: 'LOCAL_KEYVAULT' as const,
+    tenantEnvironment: () => environment,
+    describe: () => ({
+      generation: 3,
+      version: 'v2',
+      versions: {
+        wrapping: 'pinned-v2',
+        index: 'pinned-index',
+        control: 'pinned-control',
+      },
+    }),
+  };
+  const f = fixture(false, source);
+  environment = f.environment;
+  try {
+    const before = await f.service.keyStatus(f.scope);
+    assert.equal(before.local?.version, 'v2');
+    assert.equal(before.local?.status, 'connected');
+    const result = await f.service.configureKeys(
+      f.scope,
+      { expectedRevision: before.revision },
+      { ...f.actor, issuer: 'issuer' },
+    );
+    assert.equal(result.local?.version, 'v2');
+    assert.equal(f.plain().explorer.keyBindings.bindings[0].version, 'v2');
+    // Include the legacy runtime projection which still derives env-era v1
+    // metadata; loaded vault versions must remain the authoritative generation.
+    const payload = f.plain();
+    payload.tenants = [
+      {
+        id: 'demo',
+        mongoUri: uri('demo'),
+        clerkSecret: 'legacy-unused',
+        wrappingKeyRef: 'env:WORKFLOW_REAL_DEMO_WRAPPING_KEY_V1',
+        indexKeyRef: 'env:WORKFLOW_REAL_DEMO_INDEX_KEY',
+        controlKeyRef: 'env:WORKFLOW_REAL_DEMO_CONTROL_KEY',
+        runtimePolicy: null,
+      },
+    ];
+    f.rows.tenantWorkflowConfiguration[0] = encodeRuntimeEnvelope(
+      payload,
+      f.key,
+      control,
+    );
+    const reloaded = await f.service.loadKeyBindings();
+    assert.equal(reloaded[0]?.version, 'v2');
+    const status = await f.service.keyStatus(f.scope);
+    assert.equal(status.local?.status, 'connected');
+    assert.equal(status.local?.version, 'v2');
   } finally {
     f.service.onModuleDestroy();
   }
