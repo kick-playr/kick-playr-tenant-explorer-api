@@ -7,7 +7,7 @@ import {
 } from '@kick-playr/local-key-vault/runtime-client';
 import { createExplorerSecrets } from '../src/secrets.js';
 
-test('Explorer startup consumes the pinned published atomic snapshot contract without provisioning requests', async () => {
+test('Explorer startup discovers a pinned vault manifest without local bindings or provisioning requests', async () => {
   const values: Record<string, string> = {
     EXPLORER_MONGODB_URI:
       'mongodb://user:placeholder@localhost/control?tls=true&authSource=admin',
@@ -33,16 +33,6 @@ test('Explorer startup consumes the pinned published atomic snapshot contract wi
   const env = {
     NODE_ENV: 'development',
     SECRETS_KEYS_STRATEGY: 'LOCAL_KEYVAULT',
-    LOCAL_KEYVAULT_BINDINGS_JSON: JSON.stringify({
-      schemaVersion: 1,
-      applications: {
-        'explorer-api': {
-          scope: { environment: 'development', tenant: '_shared' },
-          request,
-        },
-      },
-      tenants: [],
-    }),
     LOCAL_KEYVAULT_AUTH_JSON: JSON.stringify({
       schemaVersion: 1,
       grants: [
@@ -59,6 +49,12 @@ test('Explorer startup consumes the pinned published atomic snapshot contract wi
     environment: env,
     fetch: async (url, options) => {
       calls++;
+      if (calls === 1) {
+        assert.equal(url, 'http://127.0.0.1:4000/local/runtime-manifests/explorer-api');
+        assert.equal(options?.method, 'GET');
+        assert.equal(options?.redirect, 'error');
+        return Response.json({ schemaVersion: 1, application: 'explorer-api', scope: { environment: 'development', tenant: '_shared' }, request, tenants: [] });
+      }
       assert.equal(url, 'http://127.0.0.1:4000/local/runtime-snapshot');
       assert.equal(options?.method, 'POST');
       assert.equal(options?.redirect, 'error');
@@ -89,6 +85,6 @@ test('Explorer startup consumes the pinned published atomic snapshot contract wi
     source.environment.WORKFLOW_SHARED_WRAPPING_KEY_V1,
     values.WORKFLOW_SHARED_WRAPPING_KEY_V1,
   );
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
   source.close();
 });

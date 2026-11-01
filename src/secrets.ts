@@ -4,6 +4,7 @@ import type {
   RuntimeKeySet,
   Strategy,
 } from '@kick-playr/local-key-vault/runtime-client';
+import type { StartupDiagnostics } from './startup-diagnostics.js';
 
 const fail = () => Error('Explorer secrets unavailable');
 const restart = () => Error('Tenant secrets require application restart');
@@ -186,6 +187,7 @@ export class ExplorerSecrets implements TenantKeySource {
 export async function createExplorerSecrets(
   environment: NodeJS.ProcessEnv,
   injected?: SecretsRuntime,
+  diagnostics?: StartupDiagnostics,
 ): Promise<ExplorerSecrets> {
   const strategy = environment.SECRETS_KEYS_STRATEGY ?? 'ENV_VARIABLES';
   if (!['ENV_VARIABLES', 'LOCAL_KEYVAULT'].includes(strategy)) throw fail();
@@ -193,7 +195,23 @@ export async function createExplorerSecrets(
     injected ??
     (
       await import('@kick-playr/local-key-vault/runtime-client')
-    ).createSecretsRuntime({ environment });
+    ).createSecretsRuntime({
+      environment,
+      fetch: diagnostics
+        ? (input, init) => {
+            const url = new URL(
+              typeof input === 'string'
+                ? input
+                : input instanceof URL ? input.href : input.url,
+            );
+            const operation = url.pathname.startsWith('/local/runtime-manifests/')
+              ? 'manifest' : 'snapshot';
+            return diagnostics.vaultRequest(
+              () => globalThis.fetch(input, init), operation,
+            );
+          }
+        : undefined,
+    });
   try {
     if (strategy === 'ENV_VARIABLES')
       return new ExplorerSecrets(strategy, { ...environment }, runtime);
