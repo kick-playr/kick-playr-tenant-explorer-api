@@ -1,11 +1,7 @@
 import 'reflect-metadata';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  recoveryDeadline,
-  checklist,
-  parseManifests,
-} from '../src/deletion/contracts.js';
+import { recoveryDeadline, checklist } from '../src/deletion/contracts.js';
 import { DeletionService } from '../src/deletion/service.js';
 import type {
   DeletionState,
@@ -101,13 +97,17 @@ function fixture() {
   let fail = false,
     verify = true,
     complete = true,
+    noBindings = false,
     active = 0,
     maxActive = 0;
   const port: PurgePort = {
     inventory: async () => ({
       revision: 'manifest-v1',
       complete,
-      targets: [{ id: 'operational', label: 'Operational database' }],
+      controlOnly: noBindings,
+      targets: noBindings
+        ? []
+        : [{ id: 'operational', label: 'Operational database' }],
     }),
     erase: async () => {
       active++;
@@ -142,6 +142,9 @@ function fixture() {
         confirmation: 'development/club',
         completed: checklist.map((x) => x.id),
         allDone: true,
+        ownershipConfirmed: true,
+        unregisteredResourcesConfirmed: true,
+        controlOnly: false,
       },
       'operator',
     );
@@ -150,6 +153,9 @@ function fixture() {
     soft,
     purge,
     events,
+    set noBindings(value: boolean) {
+      noBindings = value;
+    },
     get state() {
       return state;
     },
@@ -293,46 +299,13 @@ test('wrong environment/tenant confirmation and unchecked checklist are rejected
         confirmation: 'development/club',
         completed: [],
         allDone: true,
+        ownershipConfirmed: true,
+        unregisteredResourcesConfirmed: true,
+        controlOnly: false,
       },
       'o',
     ),
     /checklist/i,
-  );
-});
-test('manifest rejects shared database targets and protected databases', () => {
-  const entry = {
-    environment: 'development',
-    tenantId: 'club',
-    complete: true,
-    revision: 'one',
-    targets: [
-      {
-        id: 'db',
-        connectionVariable: 'CLUB_DB_URI',
-        database: 'operational',
-        exclusive: true,
-        evidence: 'inventory approved',
-      },
-    ],
-    scopedCollections: [],
-  };
-  assert.throws(
-    () =>
-      parseManifests(
-        [entry, { ...entry, tenantId: 'other' }],
-        { CLUB_DB_URI: 'mongodb://localhost/operational' },
-        'control',
-      ),
-    /shared/i,
-  );
-  assert.throws(
-    () =>
-      parseManifests(
-        [{ ...entry, targets: [{ ...entry.targets[0], database: 'admin' }] }],
-        { CLUB_DB_URI: 'mongodb://localhost/operational' },
-        'control',
-      ),
-    /protected/i,
   );
 });
 test('active delivery lease blocks purge even after invitations were revoked', async () => {
@@ -369,6 +342,9 @@ test('stale inventory and operation revisions block deletion before any target I
     confirmation: 'development/club',
     completed: checklist.map((x) => x.id),
     allDone: true,
+    ownershipConfirmed: true,
+    unregisteredResourcesConfirmed: true,
+    controlOnly: false,
   };
   await assert.rejects(f.service.purge(scope, body, 'o'), /changed/i);
   assert.equal(f.events.length, 0);
@@ -385,4 +361,48 @@ test('Zurich spring-forward recovery deadline uses the next valid wall time', ()
     recoveryDeadline('2026-12-28T01:30:00Z'),
     '2027-03-28T01:30:00.000Z',
   );
+});
+
+test('control-only cleanup cannot start without explicit empty-scope acknowledgement and both ownership attestations', async () => {
+  const f = fixture();
+  f.noBindings = true;
+  await f.soft();
+  const body = {
+    expectedRevision: 2,
+    operationId: f.state.operation!.id,
+    expectedOperationRevision: 1,
+    expectedInventoryRevision: 'manifest-v1',
+    confirmation: 'development/club',
+    completed: checklist.map((x) => x.id),
+    allDone: true,
+    ownershipConfirmed: true,
+    unregisteredResourcesConfirmed: true,
+    controlOnly: false,
+  };
+  await assert.rejects(
+    f.service.purge(scope, body, 'operator'),
+    /control-only/i,
+  );
+  assert.equal(f.state.operation!.phase, 'retained');
+  await assert.rejects(
+    f.service.purge(
+      scope,
+      { ...body, controlOnly: true, ownershipConfirmed: false },
+      'operator',
+    ),
+  );
+  await assert.rejects(
+    f.service.purge(
+      scope,
+      { ...body, controlOnly: true, unregisteredResourcesConfirmed: false },
+      'operator',
+    ),
+  );
+  const status = await f.service.purge(
+    scope,
+    { ...body, controlOnly: true },
+    'operator',
+  );
+  assert.equal(status.operation!.phase, 'purged');
+  assert.deepEqual(f.events, ['control']);
 });

@@ -1,3 +1,10 @@
+import {
+  deriveInventory,
+  DeletionInventoryResolver,
+  snapshotCollection,
+} from '../src/deletion/inventory.js';
+import { CredentialVault } from '../src/vault.js';
+import { decodeRuntimeEnvelope } from '../src/runtime-configuration.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MongoClient } from 'mongodb';
@@ -18,46 +25,57 @@ const entry = {
   targets: [target],
   scopedCollections: [],
 };
-function port(
-  tenants: unknown[],
-  pending: unknown[] = [],
-  manifest: unknown = [entry],
-) {
+function port(tenants: unknown[], pending: unknown[] = []) {
   const key = Buffer.alloc(32, 1);
   const row = encodeRuntimeEnvelope(
-    { version: 2, tenants, pendingMongoBindings: pending },
+    {
+      version: 2,
+      profile: 'workflow-real',
+      tenants,
+      pendingMongoBindings: pending,
+    },
     key,
     'control',
   );
   const client = {
-    db: () => ({ collection: () => ({ findOne: async () => row }) }),
+    db: () => ({
+      collection: (name: string) => ({
+        findOne: async () =>
+          name === 'tenantWorkflowConfiguration' ? row : null,
+      }),
+    }),
   } as unknown as MongoClient;
-  return new MongoPurgePort(client, 'control', key, manifest, {
-    CLUB_DB_URI: 'mongodb://localhost/clubdata',
-  });
-}
-test('inventory cannot omit bound database or delete another tenant binding', async () => {
-  await assert.rejects(
-    port([{ id: 'other', mongoUri: 'mongodb://localhost/clubdata' }]).inventory(
-      scope,
+  return new MongoPurgePort(
+    client,
+    'control',
+    key,
+    new DeletionInventoryResolver(
+      client,
+      'control',
+      key,
+      new CredentialVault(Buffer.alloc(32, 2)),
     ),
-    /another tenant/i,
   );
+}
+test('inventory derives bound databases and rejects a cross-tenant shared binding without a manifest', async () => {
   await assert.rejects(
     port([
-      { id: 'club', mongoUri: 'mongodb://localhost/not-in-manifest' },
+      { id: 'club', mongoUri: 'mongodb://localhost/clubdata' },
+      { id: 'other', mongoUri: 'mongodb://localhost/clubdata' },
     ]).inventory(scope),
-    /missing/i,
+    /shared/i,
   );
   const result = await port([
-    { id: 'club', mongoUri: 'mongodb://localhost/clubdata' },
+    { id: 'club', mongoUri: 'mongodb://localhost/discovered' },
   ]).inventory(scope);
   assert.equal(result.complete, true);
+  assert.equal(result.targets[0]!.label, 'Database discovered');
   assert.ok(!JSON.stringify(result).includes('mongodb:'));
 });
-test('missing inventory fails closed without destructive operations', async () => {
-  const result = await port([], [], []).inventory(scope);
-  assert.equal(result.complete, false);
+test('valid empty registered inventory explicitly describes control-only cleanup', async () => {
+  const result = await port([]).inventory(scope);
+  assert.equal(result.complete, true);
+  assert.equal(result.controlOnly, true);
 });
 test('encrypted runtime cleanup removes exact tenant only and preserves shared realms and different environments', () => {
   const root = {
@@ -85,7 +103,7 @@ test('encrypted runtime cleanup removes exact tenant only and preserves shared r
 
 import { MongoDeletionStore } from '../src/deletion/mongo.js';
 import { DeletionService } from '../src/deletion/service.js';
-import { parseManifests, checklist } from '../src/deletion/contracts.js';
+import { checklist } from '../src/deletion/contracts.js';
 import type { Document } from 'mongodb';
 function native() {
   const key = Buffer.alloc(32, 3);
@@ -147,6 +165,7 @@ function native() {
       encodeRuntimeEnvelope(
         {
           version: 2,
+          profile: 'workflow-real',
           tenants: [
             { id: 'club', mongoUri: 'mongodb://localhost/clubdata' },
             { id: 'other', mongoUri: 'mongodb://localhost/otherdata' },
@@ -162,6 +181,7 @@ function native() {
       ),
     ],
   };
+  let failDiscard = false;
   const calls: { name: string; filter: Document }[] = [];
   const match = (r: Document, f: Document) =>
     Object.entries(f).every(([k, v]) => r[k] === v);
@@ -169,7 +189,14 @@ function native() {
     withTransaction: async (work: () => Promise<any>, options: Document) => {
       assert.equal(options.readPreference, 'primary');
       assert.equal(options.writeConcern.w, 'majority');
-      return work();
+      const before = structuredClone(rows);
+      try {
+        return await work();
+      } catch (error) {
+        for (const key of Object.keys(rows)) delete rows[key];
+        Object.assign(rows, before);
+        throw error;
+      }
     },
     endSession: async () => {},
   };
@@ -220,6 +247,10 @@ function native() {
       return {};
     },
     deleteOne: async (f: Document) => {
+      if (name === snapshotCollection && failDiscard) {
+        failDiscard = false;
+        throw new Error('Fixture finalization interruption');
+      }
       rows[name] = (rows[name] ?? []).filter((r) => !match(r, f));
       return {};
     },
@@ -230,13 +261,36 @@ function native() {
     startSession: () => session,
     db: () => ({ collection }),
   } as unknown as MongoClient;
-  const manifests = parseManifests(
-    [entry],
-    { CLUB_DB_URI: 'mongodb://localhost/clubdata' },
+  const payload = decodeRuntimeEnvelope(
+    rows.tenantWorkflowConfiguration![0],
+    key,
     'control',
   );
-  const store = new MongoDeletionStore(client, 'control', key, manifests);
-  return { rows, calls, store, manifests };
+  const inventory = deriveInventory(payload, scope, 'control');
+  const inventoryResolver = new DeletionInventoryResolver(
+    client,
+    'control',
+    key,
+    new CredentialVault(Buffer.alloc(32, 9)),
+  );
+  const store = new MongoDeletionStore(
+    client,
+    'control',
+    key,
+    inventoryResolver,
+  );
+  return {
+    rows,
+    calls,
+    store,
+    manifests: [inventory],
+    inventoryResolver,
+    client,
+    key,
+    interruptDiscard: () => {
+      failDiscard = true;
+    },
+  };
 }
 test('native lifecycle preserves runtime fences and final control cleanup is scoped, verified and leaves tombstone', async () => {
   const f = native();
@@ -271,10 +325,14 @@ test('native lifecycle preserves runtime fences and final control cleanup is sco
       confirmation: 'development/club',
       completed: checklist.map((x) => x.id),
       allDone: true,
+      ownershipConfirmed: true,
+      unregisteredResourcesConfirmed: true,
+      controlOnly: false,
     },
     'operator',
   );
   assert.equal(status.operation!.phase, 'purged');
+  assert.equal(f.rows[snapshotCollection]!.length, 0);
   assert.equal(
     f.rows.tenantDeletionTargets![0]!.operationId,
     status.operation!.id,
@@ -363,7 +421,7 @@ test('purger cannot drop a database without the matching durable reservation', a
     await assert.rejects(
       port([{ id: 'club', mongoUri: 'mongodb://localhost/clubdata' }]).erase(
         scope,
-        'db',
+        databaseTargetId('mongodb://localhost/clubdata', 'clubdata'),
       ),
       /reservation/i,
     );
@@ -377,66 +435,42 @@ test('purger cannot drop a database without the matching durable reservation', a
 
 import { databaseTargetId } from '../src/database-target.js';
 test('connection-time reassignment cannot pass the permanent target reservation and fresh ownership check', async () => {
-  const key = Buffer.alloc(32, 4),
-    manifest = parseManifests(
-      [entry],
-      { CLUB_DB_URI: 'mongodb://localhost/clubdata' },
+  const f = native(),
+    purger = new MongoPurgePort(
+      f.client,
       'control',
-    )[0]!;
-  let root = encodeRuntimeEnvelope(
+      f.key,
+      f.inventoryResolver,
+    ),
+    service = new DeletionService(f.store, purger);
+  const view = await service.remove(
+    scope,
     {
-      version: 2,
-      tenants: [{ id: 'club', mongoUri: 'mongodb://localhost/clubdata' }],
-      pendingMongoBindings: [],
+      expectedRevision: 1,
+      expectedAuthorityRevision: 1,
+      expectedInvitationRevision: 1,
+      confirmation: 'development/club',
     },
-    key,
-    'control',
+    'operator',
   );
-  const operation = {
-    id: 'op',
-    phase: 'purging',
-    leaseId: 'lease',
-    leaseUntil: Date.now() + 120000,
-    manifestRevision: manifest.digest,
-  };
-  const reservation = {
-    operationId: 'op',
-    environment: 'development',
-    tenantId: 'club',
-    manifestRevision: manifest.digest,
-  };
-  const control = {
-    db: () => ({
-      collection: (name: string) => ({
-        findOne: async () =>
-          name === 'tenantWorkflowConfiguration'
-            ? root
-            : name === 'tenantDeletionOperations'
-              ? operation
-              : name === 'tenantDeletionTargets'
-                ? reservation
-                : null,
-      }),
-    }),
-  } as unknown as MongoClient;
-  const purger = new MongoPurgePort(control, 'control', key, [entry], {
-    CLUB_DB_URI: 'mongodb://localhost/clubdata',
-  });
+  const preview = await purger.inventory(scope);
   const connect = MongoClient.prototype.connect,
     close = MongoClient.prototype.close,
     drop = Db.prototype.dropDatabase;
   let drops = 0;
   MongoClient.prototype.connect = async function () {
-    root = encodeRuntimeEnvelope(
-      {
-        version: 2,
-        tenants: [
-          { id: 'club', mongoUri: 'mongodb://localhost/clubdata' },
-          { id: 'other', mongoUri: 'mongodb://localhost/clubdata' },
-        ],
-        pendingMongoBindings: [],
-      },
-      key,
+    const payload = decodeRuntimeEnvelope(
+      f.rows.tenantWorkflowConfiguration![0],
+      f.key,
+      'control',
+    ) as any;
+    payload.tenants.push({
+      id: 'foreign',
+      mongoUri: 'mongodb://localhost/clubdata',
+    });
+    f.rows.tenantWorkflowConfiguration![0] = encodeRuntimeEnvelope(
+      payload,
+      f.key,
       'control',
     );
     return this;
@@ -447,7 +481,23 @@ test('connection-time reassignment cannot pass the permanent target reservation 
     return true;
   };
   try {
-    await assert.rejects(purger.erase(scope, 'db'), /another tenant/i);
+    const status = await service.purge(
+      scope,
+      {
+        expectedRevision: 2,
+        operationId: view.operation!.id,
+        expectedOperationRevision: 1,
+        expectedInventoryRevision: preview.revision,
+        confirmation: 'development/club',
+        completed: checklist.map((x) => x.id),
+        allDone: true,
+        ownershipConfirmed: true,
+        unregisteredResourcesConfirmed: true,
+        controlOnly: false,
+      },
+      'operator',
+    );
+    assert.equal(status.operation!.phase, 'failed');
     assert.equal(drops, 0);
   } finally {
     MongoClient.prototype.connect = connect;
@@ -499,6 +549,9 @@ test('foreign permanent target reservation blocks purge claim before any databas
         confirmation: 'development/club',
         completed: checklist.map((x) => x.id),
         allDone: true,
+        ownershipConfirmed: true,
+        unregisteredResourcesConfirmed: true,
+        controlOnly: false,
       },
       'operator',
     ),
@@ -506,4 +559,73 @@ test('foreign permanent target reservation blocks purge claim before any databas
   );
   assert.equal(erased, false);
   assert.equal(f.rows.tenantDeletionOperations![0]!.phase, 'retained');
+});
+
+test('crash after runtime prune but before final operation commit preserves encrypted targets and retries the same snapshot', async () => {
+  const f = native();
+  let erases = 0;
+  const purger = {
+    inventory: async () => {
+      const m = await f.inventoryResolver.resolve(scope);
+      return {
+        complete: true,
+        revision: m.digest,
+        controlOnly: m.controlOnly,
+        targets: m.targets.map((t) => ({
+          id: t.id,
+          label: `Database ${t.database}`,
+        })),
+      };
+    },
+    erase: async () => {
+      erases++;
+    },
+    absent: async () => true,
+  };
+  const service = new DeletionService(f.store, purger);
+  const view = await service.remove(
+    scope,
+    {
+      expectedRevision: 1,
+      expectedAuthorityRevision: 1,
+      expectedInvitationRevision: 1,
+      confirmation: 'development/club',
+    },
+    'operator',
+  );
+  const request = (revision: number) => ({
+    expectedRevision: 2,
+    operationId: view.operation!.id,
+    expectedOperationRevision: revision,
+    expectedInventoryRevision: f.manifests[0]!.digest,
+    confirmation: 'development/club',
+    completed: checklist.map((x) => x.id),
+    allDone: true,
+    ownershipConfirmed: true,
+    unregisteredResourcesConfirmed: true,
+    controlOnly: false,
+  });
+  f.interruptDiscard();
+  const failed = await service.purge(scope, request(1), 'operator');
+  assert.equal(failed.operation!.phase, 'failed');
+  assert.equal(f.rows[snapshotCollection]!.length, 1);
+  assert.ok(!JSON.stringify(f.rows[snapshotCollection]).includes('mongodb'));
+  const pruned = decodeRuntimeEnvelope(
+    f.rows.tenantWorkflowConfiguration![0],
+    f.key,
+    'control',
+  ) as any;
+  assert.ok(!pruned.tenants.some((t: any) => t.id === 'club'));
+  const retry = await service.purge(
+    scope,
+    request(failed.operation!.revision),
+    'operator',
+  );
+  assert.equal(retry.operation!.phase, 'purged');
+  assert.equal(erases, 1);
+  assert.equal(f.rows[snapshotCollection]!.length, 0);
+  assert.equal(
+    f.rows.tenantDeletionTargets![0]!.operationId,
+    retry.operation!.id,
+  );
 });

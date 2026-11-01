@@ -1,4 +1,8 @@
 import {
+  DeletionInventoryResolver,
+  type RegisteredTarget,
+} from './inventory.js';
+import {
   databaseTargetId,
   deletionTargetCollection,
 } from '../database-target.js';
@@ -12,15 +16,12 @@ import {
   type RuntimeEnvelope,
 } from '../runtime-configuration.js';
 import {
-  location,
-  parseManifests,
   scopeKey,
   type DeletionStore,
   type DeletionTransaction,
   type DeletionState,
   type Operation,
   type PurgePort,
-  type ResolvedManifest,
   type Scope,
 } from './contracts.js';
 import type { InvitationState } from '../invitations/types.js';
@@ -51,62 +52,13 @@ export function pruneRuntime(payload: Record<string, any>, s: Scope) {
   }
   return copy;
 }
-export async function validateRuntimeTargets(
-  payload: Record<string, any>,
-  m: ResolvedManifest,
-  s: Scope,
-) {
-  if (
-    !Array.isArray(payload.tenants) ||
-    !Array.isArray(payload.pendingMongoBindings ?? [])
-  )
-    throw new ConflictException('Runtime database inventory unavailable');
-  const bindings = [
-    ...payload.tenants,
-    ...((payload.pendingMongoBindings as any[]) ?? []),
-  ];
-  const mine =
-    s.environment === 'development'
-      ? bindings.filter((t) => (t.id ?? t.tenantId) === s.tenantId)
-      : [];
-  for (const t of bindings) {
-    if (!t || typeof t.mongoUri !== 'string')
-      throw new ConflictException(
-        'Runtime database ownership inventory incomplete',
-      );
-    const parsed = new (
-      await import('mongodb-connection-string-url')
-    ).ConnectionString(t.mongoUri);
-    const db = decodeURIComponent(parsed.pathname.slice(1));
-    const loc = location(t.mongoUri, db);
-    if (
-      (s.environment !== 'development' ||
-        (t.id ?? t.tenantId) !== s.tenantId) &&
-      m.targets.some((x) => x.location === loc)
-    )
-      throw new ConflictException('Database is referenced by another tenant');
-  }
-  for (const t of mine) {
-    const parsed = new (
-      await import('mongodb-connection-string-url')
-    ).ConnectionString(t.mongoUri);
-    const loc = location(
-      t.mongoUri,
-      decodeURIComponent(parsed.pathname.slice(1)),
-    );
-    if (!m.targets.some((x) => x.location === loc))
-      throw new ConflictException(
-        'Runtime database missing from deletion inventory',
-      );
-  }
-}
 /** Owns the same control database session as tenant lifecycle and invitation fences. */
 export class MongoDeletionStore implements DeletionStore {
   constructor(
     private readonly client: MongoClient,
     private readonly database: string,
     private readonly key: Buffer,
-    private readonly manifests: readonly ResolvedManifest[],
+    private readonly inventoryResolver: DeletionInventoryResolver,
   ) {}
   private collection(name: string) {
     return this.client.db(this.database).collection<Document>(name);
@@ -153,23 +105,13 @@ export class MongoDeletionStore implements DeletionStore {
     revision: string,
     session: ClientSession,
   ) {
-    const manifest = this.manifests.find(
-      (m) => m.environment === s.environment && m.tenantId === s.tenantId,
-    );
-    if (!manifest || manifest.digest !== revision)
-      throw new ConflictException(
-        'Verified database reservation inventory unavailable',
-      );
-    const opts = { session, maxTimeMS: 5000 };
-    const root = await this.client
-      .db(this.database)
-      .collection<RuntimeEnvelope>('tenantWorkflowConfiguration')
-      .findOne({ _id: 'runtime:development' }, opts);
-    await validateRuntimeTargets(
-      decodeRuntimeEnvelope(root, this.key, this.database),
-      manifest,
+    const manifest = await this.inventoryResolver.freeze(
       s,
+      operationId,
+      revision,
+      session,
     );
+    const opts = { session, maxTimeMS: 5000 };
     for (const target of [...manifest.targets].sort((a, b) =>
       a.location.localeCompare(b.location),
     )) {
@@ -272,6 +214,17 @@ export class MongoDeletionStore implements DeletionStore {
               { ...state.operation, _id: scopeKey(s) as never },
               { ...opts, upsert: true },
             );
+          // Final operation state and snapshot destruction commit together. A crash after
+          // runtime pruning but before this transaction retains retry credentials.
+          if (
+            state.operation?.phase === 'purged' &&
+            before.operation?.phase !== 'purged'
+          )
+            await this.inventoryResolver.discard(
+              s,
+              state.operation.id,
+              session,
+            );
           if (state.invitations)
             await this.collection('tenantManagerInvitations').replaceOne(
               { _id: scopeKey(s) as never },
@@ -321,9 +274,7 @@ export class MongoDeletionStore implements DeletionStore {
             throw new ConflictException(
               'Deletion lease or database verification changed',
             );
-          const manifest = this.manifests.find(
-            (m) => m.environment === s.environment && m.tenantId === s.tenantId,
-          );
+          const manifest = await this.inventoryResolver.resolve(s, session, op);
           if (!manifest || manifest.digest !== op.manifestRevision)
             throw new ConflictException('Deletion inventory changed');
           for (const target of manifest.targets) {
@@ -427,44 +378,19 @@ export class MongoDeletionStore implements DeletionStore {
 }
 /** Connections and targets are operator-owned. No request input reaches db()/dropDatabase(). */
 export class MongoPurgePort implements PurgePort {
-  readonly manifests: ResolvedManifest[];
   constructor(
     private readonly control: MongoClient,
     private readonly database: string,
     private readonly key: Buffer,
-    input: unknown,
-    env: NodeJS.ProcessEnv,
-  ) {
-    this.manifests = parseManifests(input, env, database);
-  }
-  private manifest(s: Scope) {
-    return this.manifests.find(
-      (m) => m.environment === s.environment && m.tenantId === s.tenantId,
-    );
-  }
+    private readonly inventoryResolver: DeletionInventoryResolver,
+  ) {}
   async inventory(s: Scope) {
-    const m = this.manifest(s);
-    if (!m)
-      return {
-        revision: 'unconfigured',
-        complete: false,
-        targets: [],
-        reason:
-          'An operator must configure a complete verified deletion inventory',
-      };
-    const row = await this.control
-      .db(this.database)
-      .collection<RuntimeEnvelope>('tenantWorkflowConfiguration')
-      .findOne(
-        { _id: 'runtime:development' },
-        { readPreference: 'primary', maxTimeMS: 5000 },
-      );
-    const payload = decodeRuntimeEnvelope(row, this.key, this.database);
-    await validateRuntimeTargets(payload, m, s);
+    const inventory = await this.inventoryResolver.resolve(s);
     return {
-      revision: m.digest,
+      revision: inventory.digest,
       complete: true,
-      targets: m.targets.map((t) => ({
+      controlOnly: inventory.controlOnly,
+      targets: inventory.targets.map((t) => ({
         id: t.id,
         label: `Database ${t.database}`,
       })),
@@ -472,7 +398,8 @@ export class MongoPurgePort implements PurgePort {
   }
   private async reservation(
     s: Scope,
-    target: ResolvedManifest['targets'][number],
+    target: RegisteredTarget,
+    revision: string,
   ) {
     const opts = { readPreference: 'primary' as const, maxTimeMS: 5000 };
     const operation = await this.control
@@ -491,7 +418,7 @@ export class MongoPurgePort implements PurgePort {
       operation.phase !== 'purging' ||
       !operation.leaseId ||
       Number(operation.leaseUntil) <= Date.now() ||
-      operation.manifestRevision !== this.manifest(s)?.digest ||
+      operation.manifestRevision !== revision ||
       reservation?.operationId !== operation.id ||
       reservation?.environment !== s.environment ||
       reservation?.tenantId !== s.tenantId ||
@@ -507,9 +434,10 @@ export class MongoPurgePort implements PurgePort {
     work: (client: MongoClient, database: string) => Promise<T>,
   ): Promise<T> {
     await this.inventory(s);
-    const t = this.manifest(s)?.targets.find((t) => t.id === id);
+    const inventory = await this.inventoryResolver.resolve(s);
+    const t = inventory.targets.find((t) => t.id === id);
     if (!t) throw new ConflictException('Database target unavailable');
-    await this.reservation(s, t);
+    await this.reservation(s, t, inventory.digest);
     const client = new MongoClient(t.uri, {
       connectTimeoutMS: 5000,
       serverSelectionTimeoutMS: 5000,
@@ -519,7 +447,7 @@ export class MongoPurgePort implements PurgePort {
     });
     try {
       await client.connect();
-      await this.reservation(s, t);
+      await this.reservation(s, t, inventory.digest);
       await this.inventory(s);
       return await work(client, t.database);
     } finally {

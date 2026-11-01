@@ -1,0 +1,11 @@
+# APP-29 UI-driven permanent deletion
+
+User explicitly requests force-confirmed permanent deletion in UI without EXPLORER_DELETION_MANIFEST_JSON. Replace the manual environment manifest requirement, retaining all current permission, revision, reservation, retry and shared/protected resource checks. Existing Freddie UX flow remains; the UI preview now derives registered databases from server-owned encrypted runtime configuration. Show only names/scope, never URI credentials.
+
+Chris explicitly APPROVED revised architecture: derive and validate complete tenants/pendingMongoBindings inventory; deduplicate selected databases, reject malformed/ambiguous records, other tenant references and protected databases. User must acknowledge exclusive ownership of displayed databases and manual cleanup of unregistered resources. Control-only cleanup is explicit and supported only in development with a valid authoritative envelope showing no selected bindings; other environments blocked as unsupported.
+
+Claim transaction recomputes revision and atomically freezes encrypted snapshot and permanent target reservations. Vault binding includes environment/tenant/operation/inventory revision. Retries use frozen snapshot, revalidate current cross-tenant inventory/reservations/lease, and survive legitimate source pruning. Only after successful cleanup and finalization delete the encrypted snapshot. Keep secret-free labels/reservations/minimal audit. Preserve assignment transactional fences, existing checklist/allDone/exact env/id, three-month recovery and anytime purge. No real destructive calls authorized.
+
+UI copy: Delete registered tenant databases and tenant control records. Distinguish explicit control-only cleanup. Unsupported/invalid scope is a warning/error, not green success. Unknown infrastructure/cache/unregistered databases require manual cleanup; no claim of automatic discovery of all infrastructure.
+
+Approach selected: UI attestation plus server-derived database inventory. The previous separate operator JSON list adds unwanted manual configuration and is superseded. Arbitrary browser database names/URIs or bypassing target reservations would violate tenant isolation and are excluded.

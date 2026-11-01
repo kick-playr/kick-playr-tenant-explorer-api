@@ -95,13 +95,15 @@ export class DeletionService {
     let inventory;
     try {
       inventory = await this.purger.inventory(s);
-    } catch {
+    } catch (error) {
       inventory = {
         revision: 'unavailable',
         complete: false,
         targets: [],
         reason:
-          'Database inventory unavailable; operator configuration required',
+          error instanceof ConflictException
+            ? error.message
+            : 'Registered database inventory unavailable; review the authoritative runtime configuration',
       };
     }
     return { ...current, inventory };
@@ -190,6 +192,13 @@ export class DeletionService {
     if (!inventory.complete)
       throw new ConflictException(
         'Complete verified database inventory required',
+      );
+    if (
+      b.controlOnly !==
+      (inventory.controlOnly ?? inventory.targets.length === 0)
+    )
+      throw new ConflictException(
+        'Confirm the displayed registered-database or control-only cleanup scope',
       );
     const lease = randomUUID();
     const work = await this.store.transact(s, async (x, transaction) => {

@@ -188,41 +188,36 @@ inviting the first manager. Preview/production HSM custody is still unavailable.
 
 ## Controlled tenant deletion (APP-29)
 
-Platform administrators can mark a tenant for deletion in Overview → Danger zone. This atomically disables the definition/runtime authority and revokes tenant user/service grants and invitation principals/links. Existing provider effects may still settle; this is not an external recall operation. The tenant remains read-only and discoverable through **Marked for deletion**. Its ID/domains stay reserved during retention.
+Platform tenant Overview → **Danger zone** supports access-blocking deletion with three calendar months of recovery in Europe/Zurich (month-end clamped). Recovery restores a disabled tenant with fresh grants required. Deleted tenants stay read-only and discoverable through **Marked for deletion**. No unattended purge runs when recovery expires.
 
-Recovery is available for **three calendar months in Europe/Zurich**, with month-end clamping. Recovery restores a **disabled** tenant; revoked access is not restored. No unattended purge runs when the date expires. A permanently latched purge cannot be recovered, even if a cleanup step fails.
+### Permanent deletion from the UI
 
-Permanent deletion is available **anytime**, including during recovery. It requires every manual cleanup checkbox, the final all-done confirmation, exact `environment/tenantId`, and current configuration/operation/inventory revisions. The checklist covers exclusive resource ownership, external access, schedules and in-flight/unknown provider effects, external files/backups, integrations, Clerk, DNS/certificates and caches/runtime copies. Shared resources must remain protected. The database stage follows that checklist; operators do not need to drop those databases themselves.
+The scope is **Delete registered tenant databases and tenant control records**. The authenticated server reads database bindings from `tenantWorkflowConfiguration/runtime:development` (`tenants` and `pendingMongoBindings`) and shows **database names only**. No separate deletion-manifest environment setting is needed. Browser input never supplies a database name, connection string, collection or filter.
 
-### Operator-owned database inventory
+Permanent deletion is available anytime, including during recovery. The administrator must complete the manual cleanup checklist, explicitly confirm exclusive ownership of the displayed databases/control records, confirm unregistered resources have been handled manually, check the final all-done confirmation and type exact `environment/tenantId`. Every request is bound to current configuration, operation and derived inventory revisions. Missing or stale confirmation never starts cleanup.
 
-`EXPLORER_DELETION_MANIFEST_JSON` defaults to `[]`: soft deletion/recovery works but permanent purge is blocked until a complete verified inventory is configured. This configuration is privileged operator input, never a browser field. Example with **fixture names only**:
+Only **development** currently has authoritative registered database coverage. Other environments are visibly blocked as unsupported; absence of an environment adapter never means there are no databases. A valid development envelope with no selected runtime or pending binding enables an explicit **Delete tenant control records only** acknowledgment. Missing, malformed, ambiguous, protected or shared inventory blocks cleanup instead of silently falling back to control-only deletion. Duplicate selected bindings for the same physical database/URI are deduplicated; conflicting or cross-tenant bindings are rejected. Protected `admin/local/config` and the control database are never whole-database targets.
 
-```json
-[
-  {
-    "environment": "development",
-    "tenantId": "example-club",
-    "complete": true,
-    "revision": "inventory-reviewed-2026-11-01",
-    "targets": [
-      {
-        "id": "operational",
-        "connectionVariable": "EXAMPLE_CLUB_DELETION_MONGODB_URI",
-        "database": "example_club_operational",
-        "exclusive": true,
-        "evidence": "Operator verified exclusive ownership against infrastructure inventory"
-      }
-    ],
-    "scopedCollections": []
-  }
-]
-```
+### Immutable encrypted targets and retry safety
 
-The referenced environment variable is a server-only Mongo connection; never store its value in the manifest, UI or Jira. Include **every exclusively owned operational database** across clusters. Operators must independently verify cluster identities, URI aliases, exclusive ownership, other deployments and backup locations; a generated database name or runtime URI alone is not proof. `complete: true` is the operator's inventory attestation, not automatic discovery of infrastructure. The adapter checks current encrypted runtime/pending bindings and rejects omitted bound databases or another tenant's reference. Shared database targets, duplicates and `admin/local/config` or control-database drops are rejected. Unknown/incomplete binding records fail closed.
+The purge claim transaction recomputes the inventory revision, freezes the registered targets in `tenantDeletionSnapshots` using the existing `CredentialVault`, and permanently reserves every physical target in `tenantDeletionTargets`. Snapshot ciphertext is authenticated to environment, tenant, operation and inventory revision; URI credentials never enter the public operation, HTTP preview or audit. Already latched operations from the former manifest flow without an encrypted snapshot fail safely and require operator reconciliation; they cannot silently acquire different targets.
 
-Automatic shared-control cleanup removes exact `(environment, tenantId)` configuration, runtime authorities, host bindings, setup proofs, API keys/managers and audit data, plus invitation state by exact `environment/tenantId`. Extra shared-control collections may be named in `scopedCollections` only if their authoritative scope fields are **both** `environment` and `tenantId`. Other shared database schemas and provider storage remain manual cleanup obligations; do not assert inventory completeness until those are reconciled. The shared encrypted runtime envelope is compare-and-swap updated to remove only this tenant's development runtime/pending entries, exact scoped Explorer destinations and key bindings. Shared frontend realm maps, Clerk realms, provider accounts and platform keys are preserved and reviewed manually.
+The runtime database-assignment writer touches the same location reservation document in its binding transaction. Assignment and purge claims conflict atomically, and a reserved database cannot be assigned to another tenant, including after purge completes. Connections use bounded I/O; the purger validates the current full registry, matching operation/lease and reservations before and after connecting. Privileged infrastructure changes outside supported writers, DNS aliases or independent deployments remain manual operational responsibilities.
 
-Each exclusive database target is dropped using the configured server target, then absence is verified through `listDatabases` with an exact name filter. The operator connection needs the appropriate permissions; failure remains visible and never reports success. A durable operation/lease prevents concurrent cleanup; bounded database I/O completes within its lease. Purge claim also atomically reserves every manifest target in `tenantDeletionTargets`, keyed by a canonical physical-location hash. The supported runtime database-assignment writer touches that same document in its binding transaction and rejects permanent reservations; concurrent assignment/reservation transactions therefore conflict instead of reassigning a database during deletion. Reservations survive failures and successful purge, preventing later reuse of that database location. The purger verifies its matching operation/manifest reservation before and after opening a database connection, and control cleanup verifies reservations again. Infrastructure changes outside this supported writer remain privileged operator actions: canonical hostname aliases and independent deployment writers must be reconciled before inventory completeness is asserted. Retry reuses the operation and manifest revision, so an already missing database is safe to retry. Changing inventory after purge begins blocks retries until an operator reconciles the saved operation; never edit an operation or change its target ownership casually.
+Retries read the **immutable encrypted snapshot**, recheck current cross-tenant bindings and reservations, and retain the same operation/target identities even after legitimate runtime pruning. A missing or malformed current registry still blocks retries. Each database drop is followed by case-insensitive absence verification; verification failure remains a failed step, never success. Existing missing databases are safe to verify/retry. A recreated database after an already completed step requires reconciliation rather than silently dropping newly created data.
 
-Only after database verification succeeds does a control transaction prune runtime bindings and scoped records. A minimal disabled tombstone reserves the tenant identity, and a minimal audit and target reservations retain actor/time/operation identity without credentials or prior tenant configuration. Existing audit policy governs that record; this feature introduces no TTL. The UI says **All verified database targets deleted** only after verification, not that unregistered infrastructure has been discovered or erased. Refresh deletion status after a lost response; failed/expired operations can retry under the same operation ID. There is no deployment or real resource deletion performed by the fixture tests.
+After all registered database targets are verified, a control transaction prunes the exact tenant's runtime/pending/key/Explorer destination bindings and deletes tenant-scoped configuration, credentials, authorities, host bindings, invitation/onboarding state, setup proofs, API keys/managers and prior audit data. Shared realms, provider accounts, platform keys and unrelated tenant records remain protected. A minimal disabled identity tombstone, permanent target reservations and deletion audit remain. The final **purged operation update and encrypted snapshot deletion commit in one transaction**, after control cleanup. A crash after runtime pruning or during finalization preserves the encrypted snapshot for a safe retry. Audit retention continues under the existing policy; no new TTL is introduced.
+
+### Manual cleanup checklist
+
+- Verify exclusive ownership of the displayed databases and identify unregistered database/infrastructure locations.
+- Revoke external memberships, service/API access and invitations.
+- Stop schedules and reconcile in-flight jobs, emails and unknown external outcomes; an already sent effect cannot be recalled by disabling the tenant.
+- Remove tenant-owned external files/backups under the approved retention policy.
+- Disconnect Bexio, Matrix, SMTP, IMAP, Dropbox and Pingen without deleting shared accounts or other tenants' data.
+- Remove exclusively owned Clerk resources; preserve shared identities/realms.
+- Remove tenant-owned DNS records/certificates and review domain release.
+- Clear tenant caches and running configuration copies on every runtime instance.
+- Explicitly acknowledge that unregistered databases/resources and different shared schemas were handled manually, then confirm all steps complete.
+
+The database stage follows this checklist; operators do not need to delete the **registered** database targets manually. The UI never claims to discover or erase all infrastructure. Refresh status after a lost response; failed or expired operations retry using the same frozen targets. No real tenant database or external resource is mutated by the fixture tests.
