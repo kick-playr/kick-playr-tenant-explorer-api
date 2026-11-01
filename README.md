@@ -1,5 +1,105 @@
 # Kick Playr Tenant Explorer API
 
+## Migrate embedded runtime credentials to vault references
+
+The metadata publisher does not rewrite the encrypted application configuration.
+After provisioning and publishing the `club-api` process and tenant snapshots,
+preview this separate maintenance migration from the Explorer API repository:
+
+```sh
+npm run migrate:runtime-vault -- --tenant fcrww \
+  --env-file ../fcrww-api-kick-playr-ch/.env
+```
+
+It loads the club API's pinned process snapshot, uses its control database URI and
+existing shared key, then loads the selected tenant snapshot at the database's
+current configuration revision. No API listener or tenant runtime is started.
+This command requires `LOCAL_KEYVAULT` in local development, with `_shared` and
+the selected tenant's read grants; it does not need a vault write grant.
+
+The JSON dry-run displays only field paths, target references and validation
+results. For this tenant it can change only `mongoUri` to `vault:MONGODB_URI`,
+`clerkSecret` to `vault:CLERK_SECRET_KEY`, and the shared `replayConfig.url` to
+`vault:REDIS_URL`. That Redis configuration is shared by all runtime tenants.
+Every embedded value must match the pinned vault value exactly. A missing,
+invalid or mismatched value blocks the entire write, with a field-specific reason
+and `readyToApply: false`. No secret values or connection credentials are printed.
+Already matching references are left unchanged; unrelated existing references
+are refused rather than redirected.
+
+If the preview is ready and correct, explicitly apply its source digest:
+
+```sh
+npm run migrate:runtime-vault -- --tenant fcrww \
+  --env-file ../fcrww-api-kick-playr-ch/.env \
+  --apply --expect-digest DIGEST_FROM_PREVIEW
+```
+
+Apply uses the same private encrypted backup and transactional exact-envelope CAS
+as orphan repair, also rechecking tenant revision/lifecycle before mutation.
+Pause concurrent provisioning and configuration maintenance during apply. A
+changed envelope requires a fresh preview. Any deleted tenant definition is
+refused. Other tenant rows, key references, shared encryption keys, integration
+settings and lifecycle/config revisions are preserved. Idempotent repeats make
+no further write or backup. Existing vault references can be checked for presence
+and format but cannot be compared to plaintext that was already removed.
+
+This command does not provision, fix, rotate, publish or change permissions on
+vault secrets; correct mismatches in the vault and republish explicit version pins
+first. It does not migrate pending database bindings or provider credential
+objects. It never restarts consumers; restart the relevant services yourself
+after a successful apply. `--backup-dir`, `--dry-run` and `--help` are supported.
+
+## Repair orphaned development runtime references
+
+When a tenant definition is absent but the encrypted shared configuration still
+contains its runtime/key bindings, Explorer's tenant bootstrap refuses startup.
+Use this maintenance command from this repository; the API need not be running:
+
+```sh
+npm run repair:runtime -- --tenant fcuster
+```
+
+Dry-run is the default. The JSON preview lists only removal counts by field and a
+`sourceDigest`; it does not print credentials or decrypted configuration and
+does not write a backup or change the database. It loads `.env` with exported
+variables taking precedence, including the normal `LOCAL_KEYVAULT` process
+bootstrap. It does not load tenant snapshots or start Nest/Clerk services.
+
+After reviewing the tenant, database and counts, explicitly apply the same
+document generation using the exact digest printed above:
+
+```sh
+npm run repair:runtime -- --tenant fcuster --apply --expect-digest <sourceDigest>
+```
+
+Apply first saves the original encrypted envelope to an owner-only `0600` file
+under `.local/repair-backups` (`0700` directory, ignored by Git). Retain that backup
+and the existing shared key for recovery. The script then rechecks tenant absence
+and the envelope inside a MongoDB transaction and replaces only the exact original
+envelope. If configuration changed, run dry-run again; an old digest cannot force
+an overwrite. Concurrent tenant provisioning/maintenance should be paused while
+applying this orphan repair. A backup may remain after a refused or failed apply;
+do not assume the presence of a backup means the database was updated.
+
+Only development is supported. Any existing tenant definition, including a deleted
+or purged lifecycle record, blocks this orphan-only command; use the normal tenant
+lifecycle instead. Changes are limited to the selected tenant's entries in
+`tenants`, `pendingMongoBindings`, `explorer.clubRuntimes`,
+`explorer.setupRuntimes` and `explorer.keyBindings.bindings`. Other tenants,
+environments, public realm metadata and shared configuration are preserved.
+It never deletes databases, tenant documents, vault keys/secrets or grants, and
+never generates or rotates encryption keys. It does not publish vault manifests
+or fix configuration for other tenants. Restart Explorer yourself after apply.
+
+Options: `--env-file <path>`, `--backup-dir <private-directory>`, explicit
+`--dry-run`, and `--help`. MongoDB must support transactions for apply. Errors are
+sanitized; check the named refusal code and configuration without logging secrets.
+`LocalVaultAuthInvalid` means the dotenv/bootstrap JSON could not be parsed: quote
+the entire `LOCAL_KEYVAULT_AUTH_JSON` value, preferably on one line, or export the
+complete shell-ready value produced by `create-key-vault-grants.sh`. The repair
+command never rewrites dotenv files or attempts to guess malformed credentials.
+
 Separate NestJS platform administration API for the sibling `kick-playr-tenant-explorer` Next.js application. Uses Node 24, npm, TypeScript, NestJS 12, MongoDB and Clerk, matching the existing API's stack.
 
 ## Setup
