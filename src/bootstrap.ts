@@ -21,73 +21,79 @@ import {
 import { invitationSender } from './invitations/delivery.js';
 import { OnboardingService } from './onboarding/service.js';
 import { SetupRuntime } from './onboarding/runtime.js';
+import { StartupDiagnostics } from './startup-diagnostics.js';
 function required(environment: NodeJS.ProcessEnv, name: string) {
   const value = environment[name];
   if (!value) throw new Error(`Required environment variable: ${name}`);
   return value;
 }
-export async function bootstrap(secrets: ExplorerSecrets) {
+export async function bootstrap(secrets: ExplorerSecrets, diagnostics = new StartupDiagnostics()) {
   const environment = secrets.environment;
-  const key = required(environment, 'EXPLORER_CREDENTIAL_KEY');
-  if (!/^[a-fA-F0-9]{64}$/.test(key))
-    throw new Error('EXPLORER_CREDENTIAL_KEY must be a 64-character hex key');
-  const port = Number(environment.PORT ?? 3003);
-  if (!Number.isInteger(port) || port < 1 || port > 65535)
-    throw new Error('Invalid PORT');
-  const database = required(environment, 'EXPLORER_CONTROL_DATABASE');
-  const rootText = required(environment, 'WORKFLOW_SHARED_WRAPPING_KEY_V1');
-  const rootKey = Buffer.from(rootText, 'base64');
-  if (
-    rootText.length !== 44 ||
-    rootKey.length !== 32 ||
-    rootKey.toString('base64') !== rootText
-  ) {
-    rootKey.fill(0);
-    throw Error('Invalid shared configuration bootstrap');
-  }
-  const client = new MongoClient(
-    required(environment, 'EXPLORER_MONGODB_URI'),
-    {
-      readPreference: 'primary',
-      retryReads: true,
-      retryWrites: true,
-      serverSelectionTimeoutMS: 5000,
-      connectTimeoutMS: 5000,
-      maxPoolSize: 8,
-    },
-  );
+  const { key, port, database, rootText, rootKey, client } = await diagnostics.run('configuration', async () => {
+    const key = required(environment, 'EXPLORER_CREDENTIAL_KEY');
+    if (!/^[a-fA-F0-9]{64}$/.test(key))
+      throw new Error('EXPLORER_CREDENTIAL_KEY must be a 64-character hex key');
+    const port = Number(environment.PORT ?? 3003);
+    if (!Number.isInteger(port) || port < 1 || port > 65535)
+      throw new Error('Invalid PORT');
+    const database = required(environment, 'EXPLORER_CONTROL_DATABASE');
+    const rootText = required(environment, 'WORKFLOW_SHARED_WRAPPING_KEY_V1');
+    const rootKey = Buffer.from(rootText, 'base64');
+    if (
+      rootText.length !== 44 ||
+      rootKey.length !== 32 ||
+      rootKey.toString('base64') !== rootText
+    ) {
+      rootKey.fill(0);
+      throw Error('Invalid shared configuration bootstrap');
+    }
+    const client = new MongoClient(
+      required(environment, 'EXPLORER_MONGODB_URI'),
+      {
+        readPreference: 'primary',
+        retryReads: true,
+        retryWrites: true,
+        serverSelectionTimeoutMS: 5000,
+        connectTimeoutMS: 5000,
+        maxPoolSize: 8,
+      },
+    );
+    return { key, port, database, rootText, rootKey, client };
+  });
   try {
-    let config;
+    let config: Awaited<ReturnType<typeof loadExplorerConfiguration>>;
     try {
-      await client.connect();
-      config = await loadExplorerConfiguration(client, database, rootKey);
+      await diagnostics.run('database.connect', () => client.connect());
+      config = await diagnostics.run('database.configuration', () => loadExplorerConfiguration(client, database, rootKey));
       // The decrypted database chooses the finite tenant set. No HTTP input or env
       // discovery creates an operational binding. A new revision requires restart.
       if (secrets.strategy === 'LOCAL_KEYVAULT') {
-        const bindings = config.keyBindings.bindings as {
-          tenantId: string;
-          environment: string;
-        }[];
-        const seen = new Set<string>();
-        for (const binding of bindings) {
-          const id = `${binding.environment}/${binding.tenantId}`;
-          if (seen.has(id)) continue;
-          seen.add(id);
-          const definition = await client
-            .db(database)
-            .collection('tenantDefinitions')
-            .findOne(
-              { id: binding.tenantId, environment: binding.environment },
-              { maxTimeMS: 3000 },
-            );
-          if (!definition || !Number.isSafeInteger(definition.configRevision))
-            throw Error('Tenant secrets unavailable');
-          await secrets.initializeTenant({
-            environment: binding.environment,
-            tenantId: binding.tenantId,
-            configRevision: definition.configRevision,
-          });
-        }
+        await diagnostics.run('secrets.tenants', async () => {
+          const bindings = config.keyBindings.bindings as {
+            tenantId: string;
+            environment: string;
+          }[];
+          const seen = new Set<string>();
+          for (const binding of bindings) {
+            const id = `${binding.environment}/${binding.tenantId}`;
+            if (seen.has(id)) continue;
+            seen.add(id);
+            const definition = await client
+              .db(database)
+              .collection('tenantDefinitions')
+              .findOne(
+                { id: binding.tenantId, environment: binding.environment },
+                { maxTimeMS: 3000 },
+              );
+            if (!definition || !Number.isSafeInteger(definition.configRevision))
+              throw Error('Tenant secrets unavailable');
+            await secrets.initializeTenant({
+              environment: binding.environment,
+              tenantId: binding.tenantId,
+              configRevision: definition.configRevision,
+            });
+          }
+        });
       }
     } catch (error) {
       await client.close();
@@ -143,7 +149,7 @@ export async function bootstrap(secrets: ExplorerSecrets) {
         deletionKey,
         deletionInventory,
       );
-      app = await createApp({
+      app = await diagnostics.run('application.compose', () => createApp({
         deletion: new DeletionService(
           new MongoDeletionStore(
             client,
@@ -190,9 +196,10 @@ export async function bootstrap(secrets: ExplorerSecrets) {
           adminSubjects: config.adminSubjects,
           secretKey: environment.CLERK_SECRET_KEY,
         },
-      });
+      }));
       app.enableShutdownHooks(['SIGTERM', 'SIGINT']);
-      await app.listen(port, environment.HOST ?? '127.0.0.1');
+      const application = app;
+      await diagnostics.run('server.listen', () => application.listen(port, environment.HOST ?? '127.0.0.1'));
     } catch (error) {
       await app?.close();
       runtimeMongo.onModuleDestroy();

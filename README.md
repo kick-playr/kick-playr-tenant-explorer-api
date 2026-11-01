@@ -224,19 +224,56 @@ The database stage follows this checklist; operators do not need to delete the *
 
 ## Local vault strategy (APP-36)
 
+### Startup diagnostics
+
+Startup emits structured JSON console events automatically, before the final
+generic failure message. `explorer.startup.configuration` reports the recognized
+strategy, Node environment, binding source, missing setting names and basic JSON/schema errors.
+This is a presence check; complete binding/grant validation still follows.
+`explorer.startup.stage` reports begin/success/failure and duration for process
+secrets, dependent imports, configuration, MongoDB connection/configuration,
+tenant snapshots, application composition (including Clerk configuration) and
+HTTP listening. Read the first failed stage; outer bootstrap failure events may
+follow while resources are closed.
+
+`explorer.startup.vault-request` reports the finite manifest/snapshot operation,
+transport progress, HTTP status and safe
+network codes such as `ECONNREFUSED`. A 401/403 points to grant/namespace access;
+a refused connection points to vault reachability. A manifest 404 asks the operator
+to publish the application manifest; a snapshot 404 identifies missing pinned
+versions. Response bodies are never read
+by diagnostics. No URLs, database names, credentials, tokens, secret values,
+environment dumps, raw error messages or stack traces are printed. Known missing
+configuration names and fixed troubleshooting hints remain visible. Clerk is
+configured during composition; a successful stage does not claim a live Clerk
+request or successful user authentication. Logging does not change authentication,
+readiness, retry behaviour or the selected secret strategy.
+
 `SECRETS_KEYS_STRATEGY` is absent/`ENV_VARIABLES` for the existing behavior. Set
 `LOCAL_KEYVAULT` only in local `NODE_ENV=development`; cloud/serverless activation
 is rejected. The cloud own-vault deployment remains APP-47.
 
-The shared `@kick-playr/local-key-vault/runtime-client` makes read-only atomic
-`POST /local/runtime-snapshot` requests. Configure `LOCAL_KEYVAULT_URL` (default
-`http://127.0.0.1:4000`), `LOCAL_KEYVAULT_AUTH_JSON` with exact scoped read-only
-grants, and `LOCAL_KEYVAULT_BINDINGS_JSON` with application `explorer-api` and
-pinned tenant descriptors. Use only placeholders in configuration examples:
+Minimal local configuration is `NODE_ENV=development`,
+`SECRETS_KEYS_STRATEGY=LOCAL_KEYVAULT` and `LOCAL_KEYVAULT_AUTH_JSON` with exact
+scoped read-only grants. `LOCAL_KEYVAULT_URL` defaults to
+`http://127.0.0.1:4000`; `LOCAL_KEYVAULT_ENVIRONMENT` defaults to `development`.
+No local binding JSON is required. The shared runtime client reads
+`GET /local/runtime-manifests/explorer-api` using the `_shared` grant, then makes
+the pinned atomic `POST /local/runtime-snapshot` request. For each tenant it reads
+`GET /local/runtime-manifests/explorer-api/<revision>` using that tenant's exact
+grant, verifies the digest against the startup manifest and loads its snapshot.
+Use only placeholders in configuration examples:
 
 ```json
 {"schemaVersion":1,"grants":[{"environment":"development","tenant":"_shared","token":"<read-only-explorer-api-token>"},{"environment":"development","tenant":"<tenant-id>","token":"<read-only-tenant-token>"}]}
 ```
+
+An authorized operator publishes reviewed runtime manifests once through the
+vault's publisher workflow before starting consumers; startup never publishes or
+provisions them. Publish new immutable tenant revisions and the process manifest
+when references change, then restart consumers. `LOCAL_KEYVAULT_BINDINGS_JSON`
+remains an optional explicit legacy override; manifest failures never fall back
+to it or shell secrets.
 
 Binding descriptors follow the vault runtime-snapshot contract (immutable
 versions and binding digest, no `latest`). The process descriptor contains the
@@ -247,7 +284,7 @@ exact required mappings `EXPLORER_MONGODB_URI`,
 invitation binding array are vault-owned too. Invitation sender configuration
 without a vault SMTP value stays disabled; a shell SMTP secret is never reused.
 Non-secret origin, database name, published Clerk key, sender identity and
-binding descriptors can remain in environment configuration.
+optional legacy binding descriptors can remain in environment configuration.
 
 Startup loads and validates process values before importing the server
 composition, decrypts shared configuration with the vault-sourced shared key,
