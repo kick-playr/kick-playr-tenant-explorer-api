@@ -144,7 +144,7 @@ export class MongoRepository implements Repository {
   }
   async list(query: ListQuery) {
     const filter: Document = {};
-    if (query.deletion === 'only') filter.deletionId = { $exists: true };
+    filter.deletionId = { $exists: query.deletion === 'only' };
     if (query.environment) filter.environment = query.environment;
     if (query.status) filter.status = query.status;
     if (query.search)

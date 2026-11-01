@@ -31,7 +31,7 @@ export class MemoryRepository implements Repository {
       .filter(
         (x) =>
           (!query.environment || x.environment === query.environment) &&
-          (!query.deletion || Boolean(x.deletionId)) &&
+          Object.hasOwn(x, 'deletionId') === (query.deletion === 'only') &&
           (!query.status || x.status === query.status) &&
           (!query.search ||
             [x.id, x.public.name, x.hostname, ...x.aliases]
