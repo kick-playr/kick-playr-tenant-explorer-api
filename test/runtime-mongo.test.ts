@@ -1,3 +1,4 @@
+import { databaseTargetId } from '../src/database-target.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -68,8 +69,10 @@ function fixture(registered = false) {
       },
     ],
     tenantExplorerAudit: [],
+    tenantDeletionTargets: [],
   };
   let refuseReplace = false;
+  let reserveOnAssignment = false;
   let expireOnAudit = false;
   const match = (row: any, filter: any) =>
     Object.entries(filter).every(
@@ -91,7 +94,18 @@ function fixture(registered = false) {
     },
     updateOne: async (filter: any, change: any, opts: any) => {
       assert.ok(opts.session);
-      const row = opts.session.rows[name].find((r: any) => match(r, filter));
+      if (name === 'tenantDeletionTargets' && reserveOnAssignment) {
+        rows.tenantDeletionTargets.push({
+          _id: filter._id,
+          operationId: 'purge-concurrent',
+        });
+        throw Object.assign(new Error('WriteConflict'), { code: 112 });
+      }
+      let row = opts.session.rows[name]?.find((r: any) => match(r, filter));
+      if (!row && opts.upsert) {
+        row = structuredClone(filter);
+        (opts.session.rows[name] ??= []).push(row);
+      }
       if (!row) return { matchedCount: 0 };
       for (const [field, n] of Object.entries(change.$inc ?? {}))
         row[field] = (row[field] ?? 0) + Number(n);
@@ -196,6 +210,9 @@ function fixture(registered = false) {
     key,
     expireBeforeCommit: () => {
       expireOnAudit = true;
+    },
+    reserveDuringAssignment: () => {
+      reserveOnAssignment = true;
     },
     conflict: () => {
       refuseReplace = true;
@@ -526,4 +543,60 @@ test('dynamic key metadata keeps supported explorer-only envelopes readable with
   );
   assert.deepEqual(await f.service.loadKeyBindings(), []);
   await assert.rejects(f.service.status(f.scope));
+});
+
+test('database assignment refuses a permanent purge reservation including after purge completes', async () => {
+  const f = fixture();
+  try {
+    const before = await f.service.status(f.scope);
+    f.rows.tenantDeletionTargets.push({
+      _id: databaseTargetId(uri('private-demo'), 'private-demo'),
+      operationId: 'purged-operation',
+      environment: 'development',
+      tenantId: 'deleted-club',
+    });
+    const original = JSON.stringify(f.rows.tenantWorkflowConfiguration);
+    await assert.rejects(
+      f.service.save(
+        f.scope,
+        { uri: uri('private-demo'), expectedRevision: before.revision },
+        f.actor,
+      ),
+      /reserved/i,
+    );
+    assert.equal(JSON.stringify(f.rows.tenantWorkflowConfiguration), original);
+  } finally {
+    f.service.onModuleDestroy();
+  }
+});
+test('assignment and purge reservation write the same location fence; a competing reservation aborts assignment', async () => {
+  const f = fixture();
+  try {
+    const before = await f.service.status(f.scope),
+      original = JSON.stringify(f.rows.tenantWorkflowConfiguration);
+    f.reserveDuringAssignment();
+    await assert.rejects(
+      f.service.save(
+        f.scope,
+        { uri: uri('private-demo'), expectedRevision: before.revision },
+        f.actor,
+      ),
+      /WriteConflict/i,
+    );
+    assert.equal(JSON.stringify(f.rows.tenantWorkflowConfiguration), original);
+    assert.equal(
+      f.rows.tenantDeletionTargets[0]._id,
+      databaseTargetId(uri('private-demo'), 'private-demo'),
+    );
+    await assert.rejects(
+      f.service.save(
+        f.scope,
+        { uri: uri('private-demo'), expectedRevision: before.revision },
+        f.actor,
+      ),
+      /reserved/i,
+    );
+  } finally {
+    f.service.onModuleDestroy();
+  }
 });

@@ -1,3 +1,5 @@
+import { DeletionService } from './deletion/service.js';
+import { MongoDeletionStore, MongoPurgePort } from './deletion/mongo.js';
 import { RuntimeMongoService } from './runtime-mongo.js';
 import 'dotenv/config';
 import { createApp } from './app.js';
@@ -88,7 +90,19 @@ async function bootstrap() {
   );
   let app: Awaited<ReturnType<typeof createApp>> | undefined;
   try {
+    const deletionKey = Buffer.from(rootText, 'base64');
+    const purger = new MongoPurgePort(
+      client,
+      database,
+      deletionKey,
+      JSON.parse(process.env.EXPLORER_DELETION_MANIFEST_JSON ?? '[]'),
+      process.env,
+    );
     app = await createApp({
+      deletion: new DeletionService(
+        new MongoDeletionStore(client, database, deletionKey, purger.manifests),
+        purger,
+      ),
       clubRuntime: new ClubRuntime(config.clubRuntimes),
       keyFiles: new KeyFileRegistry(
         config.keyBindings.bindings,

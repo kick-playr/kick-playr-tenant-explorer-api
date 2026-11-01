@@ -185,6 +185,7 @@ export const credentialSchema = z.strictObject({
   value: z.string().min(1).max(16384),
 });
 export const listSchema = z.strictObject({
+  deletion: z.enum(['only']).optional(),
   page: z.coerce.number().int().min(1).max(100000).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
   search: z.string().trim().max(128).optional(),
@@ -235,6 +236,7 @@ export function normalizeHost(value: string, environment: string): string {
 }
 export type ListQuery = z.infer<typeof listSchema>;
 export interface Definition {
+  deletionId?: string;
   id: string;
   environment: string;
   hostname: string;

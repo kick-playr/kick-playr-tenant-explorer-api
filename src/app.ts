@@ -1,3 +1,5 @@
+import { DeletionController } from './deletion/controller.js';
+import { DeletionService } from './deletion/service.js';
 import { RuntimeMongoService } from './runtime-mongo.js';
 import 'reflect-metadata';
 import {
@@ -113,6 +115,7 @@ class PublicRealmController {
 
 export interface AppOptions {
   repository: Repository;
+  deletion?: DeletionService;
   vault: CredentialVault;
   auth: PlatformAuthOptions;
   logger?: false;
@@ -130,6 +133,7 @@ export async function createApp(
     imports: [ThrottlerModule.forRoot([{ ttl: 60000, limit: 120 }])],
     controllers: [
       TenantController,
+      DeletionController,
       HealthController,
       ClubController,
       ExplorerAccessController,
@@ -147,6 +151,25 @@ export async function createApp(
         useValue: options.publicRealms ?? new PublicRealmDirectory(),
       },
       PlatformGuard,
+      {
+        provide: DeletionService,
+        useValue:
+          options.deletion ??
+          new Proxy(
+            {},
+            {
+              get: (_t, key) =>
+                ['status', 'remove', 'recover', 'purge'].includes(String(key))
+                  ? () => {
+                      throw new HttpException(
+                        'Tenant deletion storage unavailable',
+                        503,
+                      );
+                    }
+                  : undefined,
+            },
+          ),
+      },
       InvitationPlatformGuard,
       {
         provide: RuntimeMongoService,
