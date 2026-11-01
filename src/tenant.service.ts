@@ -33,6 +33,8 @@ export class TenantService {
     private readonly repository: Repository,
     private readonly vault: CredentialVault,
     private readonly keyFileRegistry = new KeyFileRegistry(),
+    private readonly secretsStrategy:
+      'ENV_VARIABLES' | 'LOCAL_KEYVAULT' = 'ENV_VARIABLES',
   ) {}
   private key(environment: string, id: string) {
     parse(environmentSchema, environment);
@@ -336,6 +338,10 @@ export class TenantService {
     actor: string,
   ) {
     parse(identifier, credentialId);
+    if (this.secretsStrategy === 'LOCAL_KEYVAULT')
+      throw new BadRequestException(
+        'Store credentials in the vault through the authorized provisioning workflow',
+      );
     const { expectedRevision, label, value } = parse(credentialSchema, body);
     return this.mutate(
       environment,

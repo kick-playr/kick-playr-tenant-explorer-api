@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { environmentSchema, identifier } from './contracts.js';
+import type { TenantKeySource } from './secrets.js';
 
 const variableSchema = z
   .string()
@@ -32,13 +33,15 @@ export type KeyBinding = z.infer<typeof bindingSchema>;
 type KeyTenant = {
   id: string;
   environment: string;
+  configRevision?: number;
   secretReferences: { key: string };
 };
 type FileStatus =
   'available' | 'missing' | 'insecure' | 'invalid' | 'unreadable';
 interface KeyFileInfo {
   kind: 'wrapping' | 'index' | 'control';
-  source?: 'file' | 'environment';
+  source?: 'file' | 'environment' | 'vault';
+  version?: string;
   filename?: string;
   path?: string;
   variable?: string;
@@ -51,6 +54,8 @@ export interface KeyFilesView {
   status: 'connected' | 'unavailable' | 'unbound';
   profile?: string;
   version?: string;
+  strategy?: 'ENV_VARIABLES' | 'LOCAL_KEYVAULT';
+  requiresRestart?: boolean;
   files: KeyFileInfo[];
 }
 /** Database-owned environment key references. Never reads configuration or key files. */
@@ -61,6 +66,7 @@ export class KeyFileRegistry {
     private readonly controlDatabase = '',
     private readonly environment: NodeJS.ProcessEnv = process.env,
     private readonly loadBindings?: () => Promise<KeyBinding[]>,
+    private readonly secretSource?: TenantKeySource,
   ) {
     const parsed = configSchema.safeParse({ version: 1, bindings });
     if (!parsed.success) throw new Error('Invalid explorer key-file bindings');
@@ -87,6 +93,8 @@ export class KeyFileRegistry {
         await this.loadBindings(),
         this.controlDatabase,
         this.environment,
+        undefined,
+        this.secretSource,
       ).describe(tenant);
     const reference = tenant.secretReferences.key;
     const binding = this.bindings.find(
@@ -96,7 +104,60 @@ export class KeyFileRegistry {
         b.tenantId === tenant.id &&
         b.keyReference === reference,
     );
-    if (!binding) return { reference, status: 'unbound', files: [] };
+    if (!binding)
+      return {
+        reference,
+        status: 'unbound',
+        files: [],
+        ...(this.secretSource?.strategy === 'LOCAL_KEYVAULT'
+          ? { strategy: 'LOCAL_KEYVAULT' as const, requiresRestart: true }
+          : {}),
+      };
+    if (this.secretSource?.strategy === 'LOCAL_KEYVAULT') {
+      try {
+        const values = this.secretSource.tenantEnvironment(
+          binding,
+          tenant.configRevision,
+        );
+        const metadata = this.secretSource.describe(
+          binding,
+          tenant.configRevision,
+        );
+        const files = (['wrapping', 'index', 'control'] as const).map(
+          (kind) => ({
+            ...this.inspectVariable(kind, binding.variables[kind], values),
+            source: 'vault' as const,
+            version: metadata.versions[kind],
+          }),
+        );
+        return {
+          reference,
+          profile: binding.profile,
+          version: metadata.version,
+          strategy: 'LOCAL_KEYVAULT',
+          status: files.every((file) => file.status === 'available')
+            ? 'connected'
+            : 'unavailable',
+          requiresRestart: false,
+          files,
+        };
+      } catch {
+        return {
+          reference,
+          profile: binding.profile,
+          version: binding.version,
+          strategy: 'LOCAL_KEYVAULT',
+          status: 'unavailable',
+          requiresRestart: true,
+          files: (['wrapping', 'index', 'control'] as const).map((kind) => ({
+            kind,
+            source: 'vault',
+            variable: binding.variables[kind],
+            status: 'unreadable',
+          })),
+        };
+      }
+    }
     const files = await Promise.all(
       (['wrapping', 'index', 'control'] as const).map((kind) =>
         this.inspectVariable(kind, binding.variables[kind]),
@@ -115,9 +176,11 @@ export class KeyFileRegistry {
   private inspectVariable(
     kind: KeyFileInfo['kind'],
     variable: string,
+    environment: Readonly<Record<string, string | undefined>> = this
+      .environment,
   ): KeyFileInfo {
     const info = { kind, source: 'environment' as const, variable };
-    const value = this.environment[variable];
+    const value = environment[variable];
     if (value === undefined || value === '')
       return { ...info, status: 'missing' };
     let bytes: Buffer | undefined;

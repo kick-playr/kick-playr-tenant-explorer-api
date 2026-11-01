@@ -114,6 +114,8 @@ class PublicRealmController {
 }
 
 export interface AppOptions {
+  secretsStrategy?: 'ENV_VARIABLES' | 'LOCAL_KEYVAULT';
+  shutdown?: { onModuleDestroy(): Promise<void> };
   repository: Repository;
   deletion?: DeletionService;
   vault: CredentialVault;
@@ -145,6 +147,10 @@ export async function createApp(
       ProvisioningController,
     ],
     providers: [
+      {
+        provide: 'EXPLORER_RUNTIME_RESOURCES',
+        useValue: options.shutdown ?? {},
+      },
       { provide: AUTH_OPTIONS, useValue: options.auth },
       {
         provide: PublicRealmDirectory,
@@ -269,6 +275,7 @@ export async function createApp(
             options.repository,
             options.vault,
             options.keyFiles,
+            options.secretsStrategy,
           ),
       },
       {

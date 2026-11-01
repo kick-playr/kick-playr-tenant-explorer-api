@@ -221,3 +221,59 @@ After all registered database targets are verified, a control transaction prunes
 - Explicitly acknowledge that unregistered databases/resources and different shared schemas were handled manually, then confirm all steps complete.
 
 The database stage follows this checklist; operators do not need to delete the **registered** database targets manually. The UI never claims to discover or erase all infrastructure. Refresh status after a lost response; failed or expired operations retry using the same frozen targets. No real tenant database or external resource is mutated by the fixture tests.
+
+## Local vault strategy (APP-36)
+
+`SECRETS_KEYS_STRATEGY` is absent/`ENV_VARIABLES` for the existing behavior. Set
+`LOCAL_KEYVAULT` only in local `NODE_ENV=development`; cloud/serverless activation
+is rejected. The cloud own-vault deployment remains APP-47.
+
+The shared `@kick-playr/local-key-vault/runtime-client` makes read-only atomic
+`POST /local/runtime-snapshot` requests. Configure `LOCAL_KEYVAULT_URL` (default
+`http://127.0.0.1:4000`), `LOCAL_KEYVAULT_AUTH_JSON` with exact scoped read-only
+grants, and `LOCAL_KEYVAULT_BINDINGS_JSON` with application `explorer-api` and
+pinned tenant descriptors. Use only placeholders in configuration examples:
+
+```json
+{"schemaVersion":1,"grants":[{"environment":"development","tenant":"_shared","token":"<read-only-explorer-api-token>"},{"environment":"development","tenant":"<tenant-id>","token":"<read-only-tenant-token>"}]}
+```
+
+Binding descriptors follow the vault runtime-snapshot contract (immutable
+versions and binding digest, no `latest`). The process descriptor contains the
+exact required mappings `EXPLORER_MONGODB_URI`,
+`WORKFLOW_SHARED_WRAPPING_KEY_V1`, `EXPLORER_CREDENTIAL_KEY`,
+`MANAGER_SETUP_CONTROL_KEY`, and `CLERK_SECRET_KEY`. Optional
+`EXPLORER_INVITATION_SMTP_URL` and the exact `secretKeyEnv` names in the validated
+invitation binding array are vault-owned too. Invitation sender configuration
+without a vault SMTP value stays disabled; a shell SMTP secret is never reused.
+Non-secret origin, database name, published Clerk key, sender identity and
+binding descriptors can remain in environment configuration.
+
+Startup loads and validates process values before importing the server
+composition, decrypts shared configuration with the vault-sourced shared key,
+then loads each database-authorized tenant namespace at its current config
+revision before any listener becomes ready. Key checks, status and key
+registration all use that same loaded tenant snapshot. Keys remain in scoped
+objects, never in shared `process.env`; old environment keys are not fallback.
+Status returns reference/version/source metadata only.
+
+Values remain in memory until restart, including during later vault outages.
+Changing any binding/config revision or introducing a new tenant requires
+restarting both consumers. Startup with unavailable/denied/inactive/missing
+required versions fails; no startup write, reconciliation, import or key
+generation occurs. Vault-side revocation cannot erase values already loaded;
+stop/recycle consumers for emergency revocation. ENV mode retains its old
+behavior. Raw MongoDB/credential editing through Explorer is unavailable in
+vault mode: use separately authorized vault provisioning, update reviewed
+references and restart. No live migration is performed automatically.
+
+Destructive registered-database cleanup is also blocked in vault mode until its
+frozen-target format supports immutable vault references. It never consumes
+legacy persisted MongoDB credentials as a fallback. This does not import or
+rewrite existing cleanup snapshots.
+
+After a reviewed rotation/restart the pinned vault snapshot selects its actual
+application wrapping generation (for example current v2 with retained v1).
+Legacy environment binding metadata does not force vault bytes to be labeled
+v1. Status, proofs and registration use the selected generation consistently;
+namespace/reference/mapping/config-revision checks still apply.

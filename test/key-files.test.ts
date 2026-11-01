@@ -197,3 +197,63 @@ test('derives DEMO key metadata from the encrypted runtime manifest without dupl
     ),
   );
 });
+
+test('vault status uses scoped immutable source and never environment fallback, including restart gating', async () => {
+  const binding = {
+    tenantId: 'club',
+    environment: 'development',
+    controlDatabase: 'control',
+    keyReference: 'workflow-local:club:key',
+    version: 'v1',
+    profile: 'workflow-local',
+    variables: {
+      wrapping: 'CLUB_WRAPPING_KEY_V1',
+      index: 'CLUB_INDEX_KEY',
+      control: 'CLUB_CONTROL_KEY',
+    },
+  };
+  const values = Object.fromEntries(
+    Object.values(binding.variables).map((n, i) => [
+      n,
+      Buffer.alloc(32, i + 1).toString('base64'),
+    ]),
+  );
+  const source = {
+    strategy: 'LOCAL_KEYVAULT' as const,
+    tenantEnvironment: (_: unknown, revision?: number) => {
+      if (revision !== 2) throw Error('restart');
+      return values;
+    },
+    describe: () => ({
+      generation: 8,
+      version: 'v1',
+      versions: {
+        wrapping: 'pinned-w',
+        index: 'pinned-i',
+        control: 'pinned-c',
+      },
+    }),
+  };
+  const registry = new KeyFileRegistry(
+    [binding],
+    'control',
+    {},
+    undefined,
+    source,
+  );
+  const tenant = {
+    id: 'club',
+    environment: 'development',
+    configRevision: 2,
+    secretReferences: { key: binding.keyReference },
+  };
+  const good = await registry.describe(tenant);
+  assert.equal(good.status, 'connected');
+  assert.equal(good.strategy, 'LOCAL_KEYVAULT');
+  assert.equal(good.files[0]?.source, 'vault');
+  assert.equal(good.files[0]?.version, 'pinned-w');
+  assert.ok(!JSON.stringify(good).includes(values.CLUB_INDEX_KEY!));
+  const stale = await registry.describe({ ...tenant, configRevision: 3 });
+  assert.equal(stale.status, 'unavailable');
+  assert.equal(stale.requiresRestart, true);
+});
