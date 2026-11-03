@@ -114,6 +114,8 @@ class PublicRealmController {
 }
 
 export interface AppOptions {
+  keyRotationStatus?: (environment:string,id:string)=>Promise<unknown>;
+  tenantAdmission?: import('express').RequestHandler;
   secretsStrategy?: 'ENV_VARIABLES' | 'LOCAL_KEYVAULT';
   shutdown?: { onModuleDestroy(): Promise<void> };
   repository: Repository;
@@ -276,6 +278,7 @@ export async function createApp(
             options.vault,
             options.keyFiles,
             options.secretsStrategy,
+            options.keyRotationStatus,
           ),
       },
       {
@@ -296,6 +299,7 @@ export async function createApp(
     bodyParser: false,
     logger: options.logger,
   });
+  if (options.tenantAdmission) app.use(options.tenantAdmission);
   app.use(helmet());
   app.use((_req: unknown, res: Response, next: () => void) => {
     res.setHeader('Cache-Control', 'no-store');
@@ -318,6 +322,5 @@ export async function createApp(
   SwaggerModule.setup('docs', app, document, {
     swaggerOptions: { persistAuthorization: false },
   });
-  app.enableShutdownHooks();
   return app;
 }

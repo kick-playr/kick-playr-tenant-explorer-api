@@ -155,3 +155,51 @@ test('rejects authenticated-envelope tamper, wrong database/key and malformed se
     /unavailable/,
   );
 });
+
+test('persisted immutable wrapping label survives derived runtime bindings and configuration loading', async () => {
+  const { runtimeKeyBindings } = await import('../src/key-files.js');
+  const version = 'f'.repeat(32);
+  const binding = {
+    tenantId: 'club',
+    environment: 'development',
+    controlDatabase: 'control',
+    keyReference: 'workflow-local:club:key',
+    version,
+    profile: 'workflow-local',
+    variables: {
+      wrapping: 'CLUB_WRAPPING_KEY_V1',
+      index: 'CLUB_INDEX_KEY',
+      control: 'CLUB_CONTROL_KEY',
+    },
+  };
+  const payload = {
+    version: 2,
+    profile: 'workflow-local',
+    tenants: [
+      {
+        id: 'club',
+        wrappingKeyRef: 'env:CLUB_WRAPPING_KEY_V1',
+        indexKeyRef: 'env:CLUB_INDEX_KEY',
+        controlKeyRef: 'env:CLUB_CONTROL_KEY',
+      },
+    ],
+    explorer: {
+      ...explorer(),
+      keyBindings: { version: 1, bindings: [binding] },
+    },
+  };
+  assert.equal(
+    runtimeKeyBindings(payload, database, [binding])[0]!.version,
+    version,
+  );
+  const loaded = await loadExplorerConfiguration(
+    client(row(payload)) as any,
+    database,
+    key,
+  );
+  assert.equal((loaded.keyBindings.bindings[0] as any).version, version);
+  assert.equal(runtimeKeyBindings(payload, database, [])[0]!.version, 'v1');
+  assert.throws(() =>
+    runtimeKeyBindings(payload, database, [{ ...binding, version: '' }]),
+  );
+});

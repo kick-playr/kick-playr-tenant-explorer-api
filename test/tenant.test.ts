@@ -441,3 +441,13 @@ test('generic edits cannot reactivate deletion tombstones', async () => {
     'provisioning',
   );
 });
+
+test('rotation lifecycle is readable metadata and cannot be set or overridden by public patches', async () => {
+  const {service,repository}=fixture();
+  await service.create(input(),actor);
+  await assert.rejects(service.update('development','winikon',{expectedRevision:1,status:'in-rotation'},actor));
+  await repository.transaction(async tx=>{const aggregate=(await tx.read('development','winikon'))!;aggregate.definition.status='in-rotation';await tx.save(aggregate,1);});
+  assert.equal((await service.get('development','winikon')).status,'in-rotation');
+  assert.equal((await service.list({page:1,pageSize:20,status:'in-rotation'})).items[0]?.status,'in-rotation');
+  await assert.rejects(service.update('development','winikon',{expectedRevision:1,status:'active'},actor),/rotation/i);
+});

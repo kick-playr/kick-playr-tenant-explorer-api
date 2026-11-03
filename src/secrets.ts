@@ -8,7 +8,7 @@ import type { StartupDiagnostics } from './startup-diagnostics.js';
 
 const fail = () => Error('Explorer secrets unavailable');
 const restart = () => Error('Tenant secrets require application restart');
-const processNames = [
+export const processNames = [
   'EXPLORER_MONGODB_URI',
   'WORKFLOW_SHARED_WRAPPING_KEY_V1',
   'EXPLORER_CREDENTIAL_KEY',
@@ -16,12 +16,15 @@ const processNames = [
   'CLERK_SECRET_KEY',
   'EXPLORER_INVITATION_SMTP_URL',
 ] as const;
-const requiredNames = processNames.slice(0, 5);
+export const requiredNames = processNames.slice(0, 5);
 export interface TenantSecretIdentity {
   environment: string;
   tenantId: string;
   configRevision: number;
 }
+export type TenantSnapshotLoader = (
+  identity: Readonly<TenantSecretIdentity>,
+) => Promise<RuntimeSnapshot>;
 export interface SecretKeyBinding {
   environment: string;
   tenantId: string;
@@ -40,7 +43,7 @@ export interface TenantKeySource {
     revision?: number,
   ): { generation: number; version: string; versions: Record<string, string> };
 }
-function invitationSecretNames(raw: string | undefined): string[] {
+export function invitationSecretNames(raw: string | undefined): string[] {
   let rows: unknown;
   try {
     rows = JSON.parse(raw ?? '[]');
@@ -59,6 +62,23 @@ function invitationSecretNames(raw: string | undefined): string[] {
     throw fail();
   return [...new Set(names)] as string[];
 }
+/** Code-owned conventional invitation schema plus the private configured allowlist. */
+export function liveExplorerProcessPolicy(environment: NodeJS.ProcessEnv) {
+  const names = invitationSecretNames(
+    environment.EXPLORER_INVITATION_BINDINGS_JSON,
+  );
+  const supported = (name: string) =>
+    processNames.includes(name as (typeof processNames)[number]) ||
+    /^[A-Z][A-Z0-9_]{0,100}_CLERK_SECRET_KEY$/.test(name);
+  const supportedNames = names.filter(supported);
+  return {
+    allowedMappings: [...new Set<string>([...processNames, ...supportedNames])],
+    requiredMappings: [
+      ...new Set<string>([...requiredNames, ...supportedNames]),
+    ],
+    unsupportedMappings: names.filter((name) => !supported(name)),
+  };
+}
 function key(value: string | undefined): boolean {
   if (!value || value.length !== 44) return false;
   const b = Buffer.from(value, 'base64');
@@ -75,6 +95,8 @@ export class ExplorerSecrets implements TenantKeySource {
     readonly strategy: Strategy,
     readonly environment: NodeJS.ProcessEnv,
     private readonly runtime: SecretsRuntime,
+    readonly processSnapshot?: RuntimeSnapshot,
+    private readonly tenantLoader?: TenantSnapshotLoader,
   ) {}
   async initializeTenant(identity: TenantSecretIdentity) {
     if (this.strategy !== 'LOCAL_KEYVAULT') return;
@@ -85,10 +107,12 @@ export class ExplorerSecrets implements TenantKeySource {
       identity.configRevision < 1
     )
       throw fail();
-    const snapshot = await this.runtime.loadTenant(
-      identity.tenantId,
-      identity.configRevision,
-    );
+    const snapshot = this.tenantLoader
+      ? await this.tenantLoader(Object.freeze({ ...identity }))
+      : await this.runtime.loadTenant(
+          identity.tenantId,
+          identity.configRevision,
+        );
     if (
       snapshot.tenant !== identity.tenantId ||
       snapshot.environment !== identity.environment ||
@@ -98,6 +122,32 @@ export class ExplorerSecrets implements TenantKeySource {
     const id = `${identity.environment}/${identity.tenantId}`;
     if (this.snapshots.has(id)) throw fail();
     this.snapshots.set(id, Object.freeze(structuredClone(snapshot)));
+  }
+  tenantSnapshot(identity: TenantSecretIdentity): RuntimeSnapshot | undefined {
+    const snapshot = this.snapshots.get(
+      `${identity.environment}/${identity.tenantId}`,
+    );
+    return snapshot ? structuredClone(snapshot) : undefined;
+  }
+  /** Trusted controller installation; HTTP admission holds its verified runtime lease. */
+  installTenantSnapshot(
+    identity: TenantSecretIdentity,
+    snapshot: RuntimeSnapshot,
+  ) {
+    if (
+      this.closed ||
+      this.strategy !== 'LOCAL_KEYVAULT' ||
+      snapshot.environment !== identity.environment ||
+      snapshot.tenant !== identity.tenantId ||
+      snapshot.bindingRevision !== identity.configRevision ||
+      !Number.isSafeInteger(identity.configRevision) ||
+      identity.configRevision < 1
+    )
+      throw fail();
+    this.snapshots.set(
+      `${identity.environment}/${identity.tenantId}`,
+      Object.freeze(structuredClone(snapshot)),
+    );
   }
   private set(
     binding: SecretKeyBinding,
@@ -188,6 +238,7 @@ export async function createExplorerSecrets(
   environment: NodeJS.ProcessEnv,
   injected?: SecretsRuntime,
   diagnostics?: StartupDiagnostics,
+  tenantLoader?: TenantSnapshotLoader,
 ): Promise<ExplorerSecrets> {
   const strategy = environment.SECRETS_KEYS_STRATEGY ?? 'ENV_VARIABLES';
   if (!['ENV_VARIABLES', 'LOCAL_KEYVAULT'].includes(strategy)) throw fail();
@@ -202,19 +253,31 @@ export async function createExplorerSecrets(
             const url = new URL(
               typeof input === 'string'
                 ? input
-                : input instanceof URL ? input.href : input.url,
+                : input instanceof URL
+                  ? input.href
+                  : input.url,
             );
-            const operation = url.pathname.startsWith('/local/runtime-manifests/')
-              ? 'manifest' : 'snapshot';
+            const operation = url.pathname.startsWith(
+              '/local/runtime-manifests/',
+            )
+              ? 'manifest'
+              : 'snapshot';
             return diagnostics.vaultRequest(
-              () => globalThis.fetch(input, init), operation,
+              () => globalThis.fetch(input, init),
+              operation,
             );
           }
         : undefined,
     });
   try {
     if (strategy === 'ENV_VARIABLES')
-      return new ExplorerSecrets(strategy, { ...environment }, runtime);
+      return new ExplorerSecrets(
+        strategy,
+        { ...environment },
+        runtime,
+        undefined,
+        tenantLoader,
+      );
     if (
       environment.NODE_ENV !== 'development' ||
       environment.VERCEL !== undefined ||
@@ -264,9 +327,68 @@ export async function createExplorerSecrets(
       )
         delete captured[name];
     Object.assign(captured, loaded.mappings);
-    return new ExplorerSecrets(strategy, Object.freeze(captured), runtime);
+    return new ExplorerSecrets(
+      strategy,
+      Object.freeze(captured),
+      runtime,
+      loaded.snapshot,
+      tenantLoader,
+    );
   } catch {
     runtime.close();
     throw fail();
+  }
+}
+
+/** Validate a v2 candidate without reading obsolete process values or mutating process.env.
+ * The runtime is generation-owned and supplies the authoritative tenant snapshots.
+ */
+export async function createExplorerSecretsFromSnapshot(
+  environment: NodeJS.ProcessEnv,
+  snapshot: import('@kick-playr/local-key-vault/runtime-client').ApplicationSnapshot,
+  runtime?: SecretsRuntime,
+  tenantLoader?: TenantSnapshotLoader,
+): Promise<ExplorerSecrets> {
+  const sdk = await import('@kick-playr/local-key-vault/runtime-client');
+  const selected = runtime ?? sdk.createSecretsRuntime({ environment });
+  try {
+    const parsed = sdk.parseApplicationDescriptor(
+      snapshot,
+      {
+        environment: environment.LOCAL_KEYVAULT_ENVIRONMENT ?? 'development',
+        tenant: '_shared',
+      },
+      'explorer-api',
+      true,
+    );
+    const policy = liveExplorerProcessPolicy(environment);
+    if (
+      environment.SECRETS_KEYS_STRATEGY !== 'LOCAL_KEYVAULT' ||
+      policy.unsupportedMappings.length ||
+      parsed.resources.some(
+        (resource) => !policy.allowedMappings.includes(resource.mapping),
+      )
+    )
+      throw fail();
+    return await createExplorerSecrets(
+      environment,
+      {
+        ...selected,
+        loadProcess: async () => ({
+          strategy: 'LOCAL_KEYVAULT',
+          mappings: Object.fromEntries(
+            parsed.resources.map((resource) => [
+              resource.mapping,
+              resource.value,
+            ]),
+          ),
+        }),
+      },
+      undefined,
+      tenantLoader,
+    );
+  } catch (error) {
+    selected.close();
+    throw error;
   }
 }

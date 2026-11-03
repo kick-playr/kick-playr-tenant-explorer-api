@@ -11,6 +11,7 @@ import { KeyFileRegistry } from './key-files.js';
 import { ClubRuntime } from './club-runtime.js';
 import { loadExplorerConfiguration } from './database-config.js';
 import { PublicRealmDirectory } from './public-realms.js';
+import { createTenantControllers } from './tenant-live.js';
 
 import { InvitationService } from './invitations/service.js';
 import { MongoInvitationRepository } from './invitations/repository.js';
@@ -27,7 +28,7 @@ function required(environment: NodeJS.ProcessEnv, name: string) {
   if (!value) throw new Error(`Required environment variable: ${name}`);
   return value;
 }
-export async function bootstrap(secrets: ExplorerSecrets, diagnostics = new StartupDiagnostics()) {
+export async function composeApplication(secrets: ExplorerSecrets, diagnostics = new StartupDiagnostics()) {
   const environment = secrets.environment;
   const { key, port, database, rootText, rootKey, client } = await diagnostics.run('configuration', async () => {
     const key = required(environment, 'EXPLORER_CREDENTIAL_KEY');
@@ -60,42 +61,21 @@ export async function bootstrap(secrets: ExplorerSecrets, diagnostics = new Star
     );
     return { key, port, database, rootText, rootKey, client };
   });
+  let tenantControllers: Awaited<ReturnType<typeof createTenantControllers>> | undefined;
   try {
     let config: Awaited<ReturnType<typeof loadExplorerConfiguration>>;
     try {
       await diagnostics.run('database.connect', () => client.connect());
       config = await diagnostics.run('database.configuration', () => loadExplorerConfiguration(client, database, rootKey));
-      // The decrypted database chooses the finite tenant set. No HTTP input or env
-      // discovery creates an operational binding. A new revision requires restart.
+      // Only the decrypted database can register finite tenant controllers.
       if (secrets.strategy === 'LOCAL_KEYVAULT') {
-        await diagnostics.run('secrets.tenants', async () => {
-          const bindings = config.keyBindings.bindings as {
-            tenantId: string;
-            environment: string;
-          }[];
-          const seen = new Set<string>();
-          for (const binding of bindings) {
-            const id = `${binding.environment}/${binding.tenantId}`;
-            if (seen.has(id)) continue;
-            seen.add(id);
-            const definition = await client
-              .db(database)
-              .collection('tenantDefinitions')
-              .findOne(
-                { id: binding.tenantId, environment: binding.environment },
-                { maxTimeMS: 3000 },
-              );
-            if (!definition || !Number.isSafeInteger(definition.configRevision))
-              throw Error('Tenant secrets unavailable');
-            await secrets.initializeTenant({
-              environment: binding.environment,
-              tenantId: binding.tenantId,
-              configRevision: definition.configRevision,
-            });
-          }
-        });
+        tenantControllers = await diagnostics.run('secrets.tenants', () => createTenantControllers({
+          secrets, client, database, wrappingKey: rootKey,
+          bindings: config.keyBindings.bindings as import('./secrets.js').SecretKeyBinding[],
+        }));
       }
     } catch (error) {
+      tenantControllers?.close();
       await client.close();
       secrets.close();
       throw error;
@@ -150,6 +130,8 @@ export async function bootstrap(secrets: ExplorerSecrets, diagnostics = new Star
         deletionInventory,
       );
       app = await diagnostics.run('application.compose', () => createApp({
+        tenantAdmission: tenantControllers?.middleware,
+        keyRotationStatus: tenantControllers?.rotationStatus,
         deletion: new DeletionService(
           new MongoDeletionStore(
             client,
@@ -173,7 +155,9 @@ export async function bootstrap(secrets: ExplorerSecrets, diagnostics = new Star
         secretsStrategy: secrets.strategy,
         shutdown: {
           onModuleDestroy: async () => {
+            tenantControllers?.close();
             runtimeMongo.onModuleDestroy();
+            vault.destroy();
             secrets.close();
             deletionKey.fill(0);
             await client.close();
@@ -197,19 +181,43 @@ export async function bootstrap(secrets: ExplorerSecrets, diagnostics = new Star
           secretKey: environment.CLERK_SECRET_KEY,
         },
       }));
-      app.enableShutdownHooks(['SIGTERM', 'SIGINT']);
       const application = app;
-      await diagnostics.run('server.listen', () => application.listen(port, environment.HOST ?? '127.0.0.1'));
+      await diagnostics.run('application.initialize', () => application.init());
+      return {
+        handler: application.getHttpAdapter().getInstance() as import('node:http').RequestListener,
+        close: () => application.close(),
+        port,
+        host: environment.HOST ?? '127.0.0.1',
+      };
     } catch (error) {
       await app?.close();
+      tenantControllers?.close();
       runtimeMongo.onModuleDestroy();
+      vault.destroy();
       await client.close();
       secrets.close();
       throw error;
     }
   } catch (error) {
+    tenantControllers?.close();
     await client.close();
     secrets.close();
     throw error;
   }
+}
+
+/** Compatibility entry point: a single listener owns process shutdown. */
+export async function bootstrap(secrets: ExplorerSecrets, diagnostics = new StartupDiagnostics()) {
+  const application = await composeApplication(secrets, diagnostics);
+  const { createServer } = await import('node:http');
+  const server = createServer(application.handler);
+  try {
+    await diagnostics.run('server.listen', () => new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(application.port, application.host, () => { server.off('error', reject); resolve(); });
+    }));
+  } catch (error) { await application.close(); throw error; }
+  const close = () => { server.close(); void application.close(); };
+  process.once('SIGINT', close);
+  process.once('SIGTERM', close);
 }

@@ -207,3 +207,17 @@ test('deletion status, soft delete, recovery and purge routes require platform a
     await app.close();
   }
 });
+
+test('rotation progress is admin-only safe metadata and returns the latest status or null', async () => {
+  let status:unknown={operationId:'operation',scope:{environment:'development',tenant:'club'},stage:'migrating',completed:12,total:50};
+  const app=await createApp({repository:new MemoryRepository(),vault:new CredentialVault(Buffer.alloc(32,1)),auth:{issuer,authorizedParties:[origin],adminSubjects:['user_operator'],jwtKey:keys.publicKey.export({type:'spki',format:'pem'}).toString()},logger:false,keyRotationStatus:async(environment,id)=>{assert.equal(environment,'development');assert.equal(id,'club');return status;}});
+  await app.init();const http=request(app.getHttpServer());
+  try{
+    const url='/api/platform/tenants/development/club/key-rotation';
+    await http.get(url).expect(401);
+    await http.get(url).set('Authorization',`Bearer ${token({sub:'user_member'})}`).expect(403);
+    assert.deepEqual((await http.get(url).set('Authorization',`Bearer ${token()}`).expect(200)).body,{rotation:status});
+    status=null;
+    assert.deepEqual((await http.get(url).set('Authorization',`Bearer ${token()}`).expect(200)).body,{rotation:null});
+  }finally{await app.close();}
+});

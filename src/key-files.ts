@@ -262,7 +262,9 @@ export function runtimeKeyBindings(
         )
       )
         throw new Error('Conflicting runtime key bindings');
-      existing.splice(existing.indexOf(prior), 1, binding);
+      // Runtime metadata pins variable names; the validated encrypted Explorer
+      // binding owns the logical wrapping label after a durable rotation.
+      existing.splice(existing.indexOf(prior), 1, { ...binding, version: prior.version });
     } else existing.push(binding);
   }
   return existing;

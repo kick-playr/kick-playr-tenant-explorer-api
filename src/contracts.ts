@@ -190,7 +190,7 @@ export const listSchema = z.strictObject({
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
   search: z.string().trim().max(128).optional(),
   environment: environmentSchema.optional(),
-  status: z.enum(statuses).optional(),
+  status: z.enum([...statuses,'in-rotation']).optional(),
 });
 export function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   const result = schema.safeParse(value);
@@ -241,7 +241,7 @@ export interface Definition {
   environment: string;
   hostname: string;
   aliases: string[];
-  status: (typeof statuses)[number];
+  status: (typeof statuses)[number] | 'in-rotation';
   configRevision: number;
   public: { name: string; locale: string };
   secretReferences: { mongoUri: string; key: string };

@@ -186,3 +186,118 @@ test('a restarted vault source uses current v2 with retained v1 even when legacy
   );
   assert.throws(() => source.tenantEnvironment(binding, 4), /restart/i);
 });
+
+test('trusted tenant loader supplies verified revision without an obsolete v1 manifest, and rejects a mismatched revision', async () => {
+  const transport = runtime();
+  let legacyCalls = 0;
+  const load = transport.loadTenant;
+  transport.loadTenant = async () => {
+    legacyCalls++;
+    throw Error('obsolete v1 manifest');
+  };
+  const identities: unknown[] = [];
+  const source = await createExplorerSecrets(
+    { NODE_ENV: 'development', SECRETS_KEYS_STRATEGY: 'LOCAL_KEYVAULT' },
+    transport as any,
+    undefined,
+    async (identity) => {
+      identities.push(identity);
+      return (await load(identity.tenantId, identity.configRevision)) as any;
+    },
+  );
+  const identity = {
+    environment: 'development',
+    tenantId: 'club',
+    configRevision: 7,
+  };
+  try {
+    await source.initializeTenant(identity);
+    assert.deepEqual(identities, [identity]);
+    assert.equal(legacyCalls, 0);
+    const binding = {
+      environment: 'development',
+      tenantId: 'club',
+      keyReference: 'workflow-local:club:key',
+      variables: {
+        wrapping: 'CLUB_WRAPPING_KEY_V1',
+        index: 'CLUB_INDEX_KEY',
+        control: 'CLUB_CONTROL_KEY',
+      },
+    };
+    assert.equal(source.tenantEnvironment(binding, 7).CLUB_INDEX_KEY, value(5));
+  } finally {
+    source.close();
+  }
+  const mismatched = await createExplorerSecrets(
+    { NODE_ENV: 'development', SECRETS_KEYS_STRATEGY: 'LOCAL_KEYVAULT' },
+    runtime() as any,
+    undefined,
+    async () => (await load('club', 6)) as any,
+  );
+  try {
+    await assert.rejects(mismatched.initializeTenant(identity), /unavailable/i);
+  } finally {
+    mismatched.close();
+  }
+});
+
+test('published conventional invitation schema admits only privately configured Clerk names without obsolete values', async () => {
+  const { liveExplorerProcessPolicy, createExplorerSecretsFromSnapshot } =
+    await import('../src/secrets.js');
+  const { applicationSnapshotFromLegacy, bindingDigest } =
+    await import('@kick-playr/local-key-vault/runtime-client');
+  const environment = {
+    NODE_ENV: 'development',
+    SECRETS_KEYS_STRATEGY: 'LOCAL_KEYVAULT',
+    EXPLORER_INVITATION_BINDINGS_JSON:
+      '[{"secretKeyEnv":"CLUB_CLERK_SECRET_KEY"}]',
+  };
+  const policy = liveExplorerProcessPolicy(environment);
+  assert.ok(policy.allowedMappings.includes('CLUB_CLERK_SECRET_KEY'));
+  assert.ok(policy.requiredMappings.includes('CLUB_CLERK_SECRET_KEY'));
+  assert.ok(!policy.allowedMappings.includes('UNBOUND_CLERK_SECRET_KEY'));
+  assert.deepEqual(policy.unsupportedMappings, []);
+  const values = { ...processValues, CLUB_CLERK_SECRET_KEY: 'sk_test_club' };
+  const body = {
+    schemaVersion: 1 as const,
+    bindingRevision: 1,
+    keySets: [],
+    secrets: Object.keys(values).map((mapping, i) => ({
+      mapping,
+      purpose: `process-${i}`,
+      version: String(i + 1).repeat(32),
+    })),
+  };
+  const snapshot = applicationSnapshotFromLegacy('explorer-api', {
+    ...body,
+    bindingDigest: bindingDigest(body),
+    environment: 'development',
+    tenant: '_shared',
+    generation: 1,
+    loadedAt: Date.now(),
+    secrets: body.secrets.map((s) => ({
+      ...s,
+      value: values[s.mapping as keyof typeof values],
+      attributes: {
+        enabled: true,
+        created: 1,
+        updated: 1,
+        recoveryLevel: 'Purgeable',
+      },
+    })),
+  });
+  const transport = runtime();
+  transport.loadProcess = async () => {
+    throw Error('obsolete process read');
+  };
+  const source = await createExplorerSecretsFromSnapshot(
+    environment,
+    snapshot,
+    transport as any,
+  );
+  try {
+    assert.equal(source.environment.CLUB_CLERK_SECRET_KEY, 'sk_test_club');
+  } finally {
+    source.close();
+  }
+});

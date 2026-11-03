@@ -35,10 +35,15 @@ export class TenantService {
     private readonly keyFileRegistry = new KeyFileRegistry(),
     private readonly secretsStrategy:
       'ENV_VARIABLES' | 'LOCAL_KEYVAULT' = 'ENV_VARIABLES',
+    private readonly rotationStatus?: (environment:string,id:string)=>Promise<unknown>,
   ) {}
   private key(environment: string, id: string) {
     parse(environmentSchema, environment);
     parse(identifier, id);
+  }
+  async keyRotation(environment:string,id:string) {
+    this.key(environment,id);
+    return {rotation:await this.rotationStatus?.(environment,id) ?? null};
   }
   private definitionView(d: Definition): Definition {
     return {
@@ -165,6 +170,7 @@ export class TenantService {
     return this.repository.transaction(async (tx) => {
       const aggregate = await tx.read(environment, id);
       if (!aggregate) throw new NotFoundException('Tenant not found');
+      if (aggregate.definition.status === 'in-rotation') throw new ConflictException('Tenant key rotation is in progress');
       if (aggregate.definition.deletionId)
         throw new ConflictException(
           'Tenant is marked for deletion; use the deletion workflow',

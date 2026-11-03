@@ -1,5 +1,5 @@
 type Stage = 'secrets.process' | 'server.import' | 'server.bootstrap' | 'configuration' |
-  'database.connect' | 'database.configuration' | 'secrets.tenants' | 'application.compose' | 'server.listen';
+  'database.connect' | 'database.configuration' | 'secrets.tenants' | 'application.compose' | 'application.initialize' | 'server.listen';
 type Event = Readonly<Record<string, unknown>>;
 const hints: Record<Stage, string> = {
   'secrets.process': 'Check NODE_ENV, strategy, vault authentication, bindings, pinned versions and required process mappings.',
@@ -10,6 +10,7 @@ const hints: Record<Stage, string> = {
   'database.configuration': 'Check the selected control database and the original shared configuration wrapping key.',
   'secrets.tenants': 'Check tenant namespaces, current revisions, key references, read grants and pinned vault versions.',
   'application.compose': 'Check Clerk realm configuration and server dependencies.',
+  'application.initialize': 'Check application initialization and configured providers.',
   'server.listen': 'Check HOST, PORT and whether the port is already in use.',
 };
 function safeCode(error: unknown): string | undefined {

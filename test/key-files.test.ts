@@ -168,7 +168,7 @@ test('derives DEMO key metadata from the encrypted runtime manifest without dupl
     'control',
     stale,
   ) as any[];
-  assert.equal(refreshed[0].version, 'v1');
+  assert.equal(refreshed[0].version, 'v2');
   assert.equal(refreshed[0].profile, 'workflow-real');
   const changed = structuredClone(bindings) as any[];
   changed[0].variables.index = 'OTHER_INDEX_KEY';

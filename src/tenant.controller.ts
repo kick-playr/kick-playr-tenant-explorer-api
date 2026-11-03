@@ -27,6 +27,11 @@ const revisionBody = {
 @Controller('api/platform/tenants')
 export class TenantController {
   constructor(@Inject(TenantService) private readonly service: TenantService) {}
+  @Get(':environment/:id/key-rotation')
+  @ApiOperation({summary:'Read safe latest key rotation progress; never starts a worker'})
+  keyRotation(@Param('environment') environment:string,@Param('id') id:string) {
+    return this.service.keyRotation(environment,id);
+  }
   @Get(':environment/:id/keys')
   @ApiOperation({
     summary:
