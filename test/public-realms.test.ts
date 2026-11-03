@@ -65,3 +65,12 @@ test('public realm lookup exposes exact configured public projections and reject
     await app.close();
   }
 });
+
+test('trusted directory follows refreshed configuration in the same instance', () => {
+  let config = { frontendHosts: {}, platformHosts: ['localhost:3002'] } as ConstructorParameters<typeof PublicRealmDirectory>[0];
+  const directory = new (PublicRealmDirectory as any)(config, () => config) as PublicRealmDirectory;
+  assert.throws(() => directory.resolve({ host: 'new.example' }));
+  config = { ...config!, frontendHosts: { 'new.example': { publishableKey: 'pk_test_bmV3JA==', secretVariable: 'EXPLORER_CLUB_NEW_CLERK_SECRET_KEY' } } };
+  assert.equal(directory.resolve({ host: 'new.example' }).club, true);
+  assert.throws(() => directory.resolve({ host: 'caller.example' }));
+});

@@ -11,11 +11,15 @@ export class PublicRealmDirectory {
       ExplorerDatabaseConfiguration,
       'frontendHosts' | 'platformHosts'
     > = { frontendHosts: {}, platformHosts: [] },
+    private readonly configuration?: () => Pick<ExplorerDatabaseConfiguration, 'frontendHosts' | 'platformHosts'>,
   ) {
     this.hosts = structuredClone(config.frontendHosts);
     this.platform = new Set(config.platformHosts);
   }
-  resolve(query: Record<string, unknown>) {
+  resolve(query: Record<string, unknown>): {host: string; club: boolean; publishableKey?: string; secretVariable?: string} {
+    if (this.configuration) {
+      return new PublicRealmDirectory(this.configuration()).resolve(query);
+    }
     if (
       Object.keys(query).length !== 1 ||
       !Object.hasOwn(query, 'host') ||

@@ -23,6 +23,7 @@ export class ClubRuntime {
   constructor(
     bindings: unknown = [],
     private readonly transport: typeof fetch = runtimeTransport,
+    private readonly loadBindings?: () => unknown,
   ) {
     this.bindings = z.array(bindingSchema).max(100).parse(bindings);
     const seen = new Set<string>();
@@ -53,6 +54,10 @@ export class ClubRuntime {
     path: string,
     body?: unknown,
   ): Promise<unknown> {
+    if (this.loadBindings) {
+      return new ClubRuntime(this.loadBindings(), this.transport)
+        .request(tenant, session, method, path, body);
+    }
     if (!(
       (path === '/api/settings' && ['GET', 'PATCH'].includes(method)) ||
       (path === '/api/settings/branding' && method === 'GET') ||

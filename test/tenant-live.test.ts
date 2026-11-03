@@ -181,7 +181,8 @@ test('cold child metadata failures stay scoped, selected retry recovers, and adm
     badRecovered = false,
     badAttempts = 0,
     rotationProof: unknown = null,
-    credential = 'old-provider';
+    credential = 'old-provider',
+    discoveryUnavailable = false;
   const fullBinding = {
     ...binding,
     version: 'v1',
@@ -259,18 +260,7 @@ test('cold child metadata failures stay scoped, selected retry recovers, and adm
   const env = {
     NODE_ENV: 'development',
     SECRETS_KEYS_STRATEGY: 'LOCAL_KEYVAULT',
-    LOCAL_KEYVAULT_AUTH_JSON: JSON.stringify({
-      schemaVersion: 1,
-      grants: [
-        { environment: 'development', tenant: 'club', token: 'x'.repeat(32) },
-        { environment: 'development', tenant: 'bad', token: 'z'.repeat(32) },
-        {
-          environment: 'development',
-          tenant: '_shared',
-          token: 'y'.repeat(32),
-        },
-      ],
-    }),
+    LOCAL_KEYVAULT_APPLICATION_TOKEN: 'stable-application-token-'.repeat(2),
   };
   const { createSecretsRuntime } =
     await import('@kick-playr/local-key-vault/runtime-client');
@@ -294,9 +284,12 @@ test('cold child metadata failures stay scoped, selected retry recovers, and adm
     const scopeTenant = new Headers(init?.headers).get('x-vault-tenant')!;
     assert.match(
       String(input),
-      /\/local\/runtime-manifests\/explorer-api(?:\/3)?$/,
+      /\/local\/runtime-access\/explorer-api\/runtime-manifests\/explorer-api(?:\/3)?$/,
     );
-    if (scopeTenant === '_shared')
+    assert.equal(new Headers(init?.headers).get('Authorization'), `Bearer ${env.LOCAL_KEYVAULT_APPLICATION_TOKEN}`);
+    if (scopeTenant === 'unassigned') return Response.json({error:{code:'Denied'}}, {status:403});
+    if (scopeTenant === '_shared') {
+      if (discoveryUnavailable) return Response.json({error:{code:'Unavailable'}}, {status:503});
       return Response.json({
         schemaVersion: 1,
         application: 'explorer-api',
@@ -308,20 +301,16 @@ test('cold child metadata failures stay scoped, selected retry recovers, and adm
             bindingRevision: 3,
             bindingDigest: pinned.bindingDigest,
           },
-          {
+          ...(enrolled ? [{
             tenant: 'bad',
             bindingRevision: 3,
             bindingDigest: badPinned.bindingDigest,
-          },
+          }, { tenant: 'unassigned', bindingRevision: 3, bindingDigest: badPinned.bindingDigest }] : []),
         ],
       });
+    }
     if (scopeTenant === 'bad') {
       badAttempts++;
-      if (!badRecovered)
-        return Response.json(
-          { error: { code: 'Unavailable' } },
-          { status: 503 },
-        );
     }
     return Response.json({
       schemaVersion: 1,
@@ -331,18 +320,20 @@ test('cold child metadata failures stay scoped, selected retry recovers, and adm
       tenants: [],
     });
   };
-  const newLegacy = () =>
-    createSecretsRuntime({ environment: env, fetch: metadataFetch });
+  const newLegacy = () => createSecretsRuntime({ environment: env, fetch: metadataFetch });
   let legacy = newLegacy();
   let secrets = new ExplorerSecrets('LOCAL_KEYVAULT', env, legacy);
-  const row = encodeRuntimeEnvelope(
+  let enrolled = false;
+  const unassigned = { ...badBinding, tenantId: 'unassigned', keyReference: 'workflow-local:unassigned:key' };
+
+  const makeRow = () => encodeRuntimeEnvelope(
     {
       version: 2,
       explorer: {
         issuer: 'https://example.clerk.accounts.dev',
         authorizedParties: ['http://localhost:3002'],
         adminSubjects: ['test'],
-        keyBindings: { version: 1, bindings: [fullBinding, badBinding] },
+        keyBindings: { version: 1, bindings: enrolled ? [fullBinding, badBinding, unassigned] : [fullBinding] },
         clubRuntimes: [],
         clubRealms: [],
         frontendHosts: {},
@@ -367,7 +358,7 @@ test('cold child metadata failures stay scoped, selected retry recovers, and adm
                       : binding.keyReference,
                 },
               }
-            : row,
+            : makeRow(),
       }),
     }),
   } as any;
@@ -381,6 +372,8 @@ test('cold child metadata failures stay scoped, selected retry recovers, and adm
         scope: { environment: 'development', tenant: '_shared' },
         mode: 'live',
       });
+    if (new Headers(init?.headers).get('x-vault-tenant') === 'bad' && !badRecovered)
+      return Response.json({ error: { code: 'Unavailable' } }, { status: 503 });
     if (denied)
       return Response.json({ error: { code: 'Denied' } }, { status: 403 });
     const d = descriptor(
@@ -417,7 +410,7 @@ test('cold child metadata failures stay scoped, selected retry recovers, and adm
       client,
       database: 'control',
       wrappingKey: rootKey,
-      bindings: [fullBinding, badBinding],
+      bindings: [fullBinding],
       legacyFactory: () => legacy,
       fetch: fetcher,
       rotationStatus: async () => rotationProof,
@@ -452,7 +445,18 @@ test('cold child metadata failures stay scoped, selected retry recovers, and adm
     });
   });
   try {
-    assert.ok(badAttempts > 0);
+    assert.equal(badAttempts, 0);
+    discoveryUnavailable = true;
+    await assert.rejects(manager.refresh());
+    await request(server).get('/api/platform/tenants/development/club/keys').expect(200);
+    discoveryUnavailable = false;
+    const untouchedEnvironment = { ...process.env };
+    enrolled = true;
+    await manager.refresh();
+    assert.ok(badAttempts > 0, 'new database-owned binding must be discovered');
+    assert.equal(manager.status()['development/bad']?.state, 'error');
+    assert.equal(manager.status()['development/unassigned'], undefined);
+    assert.equal(secrets.tenantSnapshot({environment:'development',tenantId:'unassigned',configRevision:3}), undefined);
     await request(server)
       .get('/api/platform/tenants/development/bad/keys')
       .expect(503);
@@ -469,6 +473,16 @@ test('cold child metadata failures stay scoped, selected retry recovers, and adm
       'old-provider',
     );
     badRecovered = true;
+    const enrollmentStarted = performance.now();
+    const enrollmentPid = process.pid;
+    while (!secrets.tenantSnapshot({ environment: 'development', tenantId: 'bad', configRevision: 3 }) && performance.now() - enrollmentStarted < 4500) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(secrets.tenantSnapshot({ environment: 'development', tenantId: 'bad', configRevision: 3 }), 'polling must stage new tenant without a request');
+    assert.equal(manager.status()['development/bad']?.state, 'ready');
+    assert.equal(process.pid, enrollmentPid);
+    assert.ok(performance.now() - enrollmentStarted < 4500);
+    assert.ok(JSON.stringify({ ...process.env }) === JSON.stringify(untouchedEnvironment), 'enrollment must not mutate process.env');
     await request(server)
       .get('/api/platform/tenants/development/bad/keys')
       .expect(200);

@@ -244,3 +244,14 @@ test('branding projection is a read-only tenant-bound operation', async () => {
   );
   assert.deepEqual(calls, ['http://127.0.0.1:4311/api/settings/branding']);
 });
+
+test('club routing adopts only refreshed trusted destinations without replacing the runtime', async () => {
+  let configured: unknown[] = [];
+  let calls = 0;
+  const runtime = new (ClubRuntime as any)([], async () => { calls++; return Response.json({ok:true}); }, () => configured) as ClubRuntime;
+  await assert.rejects(runtime.request(tenant, session, 'GET', '/api/settings'));
+  configured = bindings;
+  assert.deepEqual(await runtime.request(tenant, session, 'GET', '/api/settings'), {ok:true});
+  await assert.rejects(runtime.request({...tenant, id:'unknown'}, session, 'GET', '/api/settings'));
+  assert.equal(calls, 1);
+});

@@ -51,6 +51,7 @@ export class SetupRuntime implements SetupRuntimePort {
     value: unknown,
     private readonly keyText?: string,
     private readonly transport: typeof fetch = runtimeTransport,
+    private readonly loadBindings?: () => unknown,
   ) {
     this.bindings = parse(bindings, value);
     const seen = new Set<string>();
@@ -80,6 +81,10 @@ export class SetupRuntime implements SetupRuntimePort {
     action: SetupAction,
     input: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    if (this.loadBindings) {
+      return new SetupRuntime(this.loadBindings(), this.keyText, this.transport)
+        .request(scope, actor, action, input);
+    }
     // Key inspection is platform-only on the receiver and needs no operational
     // tenant row. Reuse a database-pinned development origin for this action only.
     const b =

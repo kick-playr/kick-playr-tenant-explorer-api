@@ -82,6 +82,7 @@ export async function composeApplication(secrets: ExplorerSecrets, diagnostics =
     } finally {
       rootKey.fill(0);
     }
+    const currentConfiguration = () => tenantControllers?.configuration() ?? config;
     const vault = new CredentialVault(Buffer.from(key, 'hex'));
     const invitationRepository = new MongoInvitationRepository(
         client,
@@ -96,6 +97,8 @@ export async function composeApplication(secrets: ExplorerSecrets, diagnostics =
     const setupRuntime = new SetupRuntime(
       config.setupRuntimes ?? config.clubRuntimes,
       environment.MANAGER_SETUP_CONTROL_KEY,
+      undefined,
+      () => currentConfiguration().setupRuntimes ?? currentConfiguration().clubRuntimes,
     );
     const runtimeMongo = new RuntimeMongoService(
       client,
@@ -141,7 +144,7 @@ export async function composeApplication(secrets: ExplorerSecrets, diagnostics =
           ),
           purger,
         ),
-        clubRuntime: new ClubRuntime(config.clubRuntimes),
+        clubRuntime: new ClubRuntime(config.clubRuntimes, undefined, () => currentConfiguration().clubRuntimes),
         keyFiles: new KeyFileRegistry(
           config.keyBindings.bindings,
           database,
@@ -149,7 +152,7 @@ export async function composeApplication(secrets: ExplorerSecrets, diagnostics =
           () => runtimeMongo.loadKeyBindings(),
           secrets,
         ),
-        publicRealms: new PublicRealmDirectory(config),
+        publicRealms: new PublicRealmDirectory(config, currentConfiguration),
         repository: new MongoRepository(client, database),
         vault,
         secretsStrategy: secrets.strategy,
@@ -175,6 +178,7 @@ export async function composeApplication(secrets: ExplorerSecrets, diagnostics =
         ),
         auth: {
           clubRealms: config.clubRealms,
+          loadClubRealms: () => currentConfiguration().clubRealms,
           issuer: config.issuer,
           authorizedParties: config.authorizedParties,
           adminSubjects: config.adminSubjects,

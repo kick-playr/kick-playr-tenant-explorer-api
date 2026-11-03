@@ -252,6 +252,7 @@ test('a separately configured club Clerk realm cannot gain platform rights throu
     },
     'operator',
   );
+  let enrolled = false;
   const app = await createApp({
     repository,
     vault,
@@ -261,7 +262,7 @@ test('a separately configured club Clerk realm cannot gain platform rights throu
       authorizedParties: [origin],
       adminSubjects: ['user_operator'],
       jwtKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
-      clubRealms: [
+      loadClubRealms: () => enrolled ? [
         {
           issuer: clubIssuer,
           authorizedParties: [origin],
@@ -269,13 +270,15 @@ test('a separately configured club Clerk realm cannot gain platform rights throu
             .export({ type: 'spki', format: 'pem' })
             .toString(),
         },
-      ],
+      ] : [],
     },
   });
   await app.init();
   const http = request(app.getHttpServer());
   try {
     const clubToken = token('user_operator', clubIssuer, clubKeys.privateKey);
+    await http.get('/api/explorer/access').set('Authorization', clubToken).expect(401);
+    enrolled = true;
     const access = await http
       .get('/api/explorer/access')
       .set('Authorization', clubToken)

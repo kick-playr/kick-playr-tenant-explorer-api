@@ -1,6 +1,6 @@
 {
   "name": "kick-playr-tenant-explorer-api",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "private": true,
   "type": "module",
   "engines": {
@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@clerk/backend": "^3.26.5",
-    "@kick-playr/local-key-vault": "git+https://github.com/kick-playr/key-vault-api.git#c442084fd96a7f130c3e627c789f38642df5722a",
+    "@kick-playr/local-key-vault": "git+https://github.com/kick-playr/key-vault-api.git#e5f0c384193fd0049a5193b95b3061b5bfe206ea",
     "@nestjs/common": "^12.3.2",
     "@nestjs/core": "^12.3.2",
     "@nestjs/platform-express": "^12.3.2",

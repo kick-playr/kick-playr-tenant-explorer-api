@@ -57,6 +57,7 @@ export function trustedClubRealms(input: unknown, platformIssuer: string) {
 }
 
 export interface PlatformAuthOptions {
+  loadClubRealms?: () => NonNullable<PlatformAuthOptions['clubRealms']>;
   clubRealms?: {
     issuer: string;
     authorizedParties: string[];
@@ -99,7 +100,7 @@ export async function verifyExplorerSession(
     const selected =
       hintedIssuer === options.issuer
         ? options
-        : options.clubRealms?.find((realm) => realm.issuer === hintedIssuer);
+        : trustedClubRealms(options.loadClubRealms?.() ?? options.clubRealms, options.issuer).find((realm) => realm.issuer === hintedIssuer);
     if (!selected) throw Error();
     const claims = await verifyToken(token, {
       jwtKey: selected.jwtKey,

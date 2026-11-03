@@ -357,12 +357,17 @@ export async function createTenantControllers(
   const create =
     options.runtimeFactory ?? createApplicationRuntime<RuntimeSnapshot>;
   const controllers = new Map<string, ApplicationRuntime<RuntimeSnapshot>>();
+  const states = new Map<string, {
+    state: 'pending' | 'loading' | 'ready' | 'error';
+    reason?: 'TenantUnavailable';
+  }>();
   const bindings = new Map(
     options.bindings.map((binding) => [
       `${binding.environment}/${binding.tenantId}`,
       binding,
     ]),
   );
+  let assigned = new Set(bindings.keys());
   let closed = false,
     live = false,
     modeUntil = 0,
@@ -506,8 +511,18 @@ export async function createTenantControllers(
       runtime.close();
       throw fail();
     }
-    controllers.set(`${binding.environment}/${binding.tenantId}`, runtime);
-    await runtime.start();
+    const id = `${binding.environment}/${binding.tenantId}`;
+    try {
+      await runtime.start();
+      await runtime.withValue((snapshot) => {
+        if (closed || !validTenantSnapshot(snapshot)) throw fail();
+        secrets.installTenantSnapshot(current.identity, snapshot);
+        controllers.set(id, runtime);
+      });
+    } catch (error) {
+      runtime.close();
+      throw error;
+    }
   }
   let modePending: Promise<void> | undefined;
   async function discoverMode() {
@@ -541,14 +556,19 @@ export async function createTenantControllers(
     const active = tenantPending.get(id);
     if (active) return active;
     const work = (async () => {
-      if (closed) throw fail();
+      if (closed || !assigned.has(id)) throw fail();
       const existing = controllers.get(id);
       if (existing) {
         await existing.start();
+        await existing.withValue((snapshot) => {
+          if (closed || !validTenantSnapshot(snapshot)) throw fail();
+        });
+        states.set(id, { state: 'ready' });
         return;
       }
       const binding = bindings.get(id);
       if (!binding) throw fail();
+      states.set(id, { state: 'loading' });
       if (!legacy.loadTenantBinding) throw fail();
       const entry = await legacy.loadTenantBinding(
         'explorer-api',
@@ -562,28 +582,85 @@ export async function createTenantControllers(
       )
         throw fail();
       await startTenant(binding, entry.request);
-    })().finally(() => {
+      states.set(id, { state: 'ready' });
+    })().catch((error) => {
+      states.set(id, { state: 'error', reason: 'TenantUnavailable' });
+      throw error;
+    }).finally(() => {
       tenantPending.delete(id);
     });
     tenantPending.set(id, work);
     return work;
   }
-  async function refresh() {
+  let configuration: Awaited<ReturnType<typeof loadExplorerConfiguration>> | undefined;
+  let refreshPending: Promise<void> | undefined;
+  async function discoverBindings() {
+    // Discovery is exclusively the intersection of published Vault assignments
+    // and the validated business registry, never a request-supplied tenant ID.
+    const runtime = legacy;
+    const [published, config] = await Promise.all([
+      runtime.refreshBindings
+        ? runtime.refreshBindings('explorer-api')
+        : runtime.loadBindings('explorer-api'),
+      loadExplorerConfiguration(client, database, rootKey),
+    ]);
+    if (closed) return;
+    configuration = config;
+    const allowed = new Set(published.tenants.map(
+      ({ scope }) => `${scope.environment}/${scope.tenant}`,
+    ));
+    assigned = allowed;
+    for (const id of bindings.keys()) {
+      if (!allowed.has(id)) {
+        states.set(id, { state: 'error', reason: 'TenantUnavailable' });
+      }
+    }
+    const configured = config.keyBindings.bindings as SecretKeyBinding[];
+    const configuredIds = new Set(configured.map(
+      (binding) => `${binding.environment}/${binding.tenantId}`,
+    ));
+    for (const id of allowed) {
+      if (!configuredIds.has(id)) {
+        states.set(id, { state: 'error', reason: 'TenantUnavailable' });
+      }
+    }
+    await Promise.allSettled(configured.map(async (binding) => {
+      const id = `${binding.environment}/${binding.tenantId}`;
+      if (!allowed.has(id) || bindings.has(id)) return;
+      states.set(id, { state: 'pending' });
+      try {
+        await authoritative(binding);
+        if (!closed) bindings.set(id, structuredClone(binding));
+      } catch {
+        states.set(id, { state: 'error', reason: 'TenantUnavailable' });
+      }
+    }));
+  }
+  async function performRefresh() {
+    await discoverBindings();
     await mode();
-    if (live)
-      await Promise.allSettled(
-        [...bindings.keys()].map((id) => ensureTenant(id)),
-      );
+    await Promise.allSettled([...bindings.entries()].filter(([id]) => assigned.has(id)).map(async ([id, binding]) => {
+      if (live) return ensureTenant(id);
+      if (secrets.tenantSnapshot({ ...binding, configRevision: 0 })) return;
+      states.set(id, { state: 'loading' });
+      try {
+        const current = await authoritative(binding);
+        if (current.paused) throw fail();
+        await secrets.initializeTenant(current.identity);
+        states.set(id, { state: 'ready' });
+      } catch {
+        states.set(id, { state: 'error', reason: 'TenantUnavailable' });
+      }
+    }));
+  }
+  function refresh() {
+    refreshPending ??= performRefresh().finally(() => {
+      refreshPending = undefined;
+    });
+    return refreshPending;
   }
   try {
     await refresh();
-    if (!live)
-      await Promise.allSettled(
-        [...bindings.values()].map(async (binding) => {
-          const current = await authoritative(binding);
-          await secrets.initializeTenant(current.identity);
-        }),
-      );
   } catch (error) {
     shared.close();
     legacy.close();
@@ -637,6 +714,7 @@ export async function createTenantControllers(
       return;
     }
     void (async () => {
+      if (!assigned.has(id)) throw fail();
       await mode();
       if (live) await ensureTenant(id);
       const runtime = controllers.get(id);
@@ -736,6 +814,10 @@ export async function createTenantControllers(
   };
   return {
     middleware,
+    status: () => Object.fromEntries(
+      [...states].map(([id, state]) => [id, { ...state }]),
+    ),
+    configuration: () => configuration ? structuredClone(configuration) : undefined,
     rotationStatus: (environment: string, id: string) =>
       status({ environment, tenantId: id, configRevision: 0 }),
     refresh,
