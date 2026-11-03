@@ -199,6 +199,10 @@ test('cold child metadata failures stay scoped, selected retry recovers, and adm
       control: 'BAD_CONTROL_KEY',
     },
   };
+  const { generateKeyPairSync, sign } = await import('node:crypto');
+  const realmKeys = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const realm = (tenant: string) => ({ issuer: `https://${tenant}.clerk.accounts.dev`, authorizedParties: [`https://${tenant}.explorer.example`], jwtKey: realmKeys.publicKey.export({type:'spki',format:'pem'}).toString() });
+  const routing = (tenant: string) => ({ tenantId: tenant, environment: 'development', hostname: `${tenant}.example`, origin: `https://${tenant}.example` });
   const rootKey = Buffer.alloc(32, 7);
   const metadata = {
     ...body,
@@ -334,9 +338,9 @@ test('cold child metadata failures stay scoped, selected retry recovers, and adm
         authorizedParties: ['http://localhost:3002'],
         adminSubjects: ['test'],
         keyBindings: { version: 1, bindings: enrolled ? [fullBinding, badBinding, unassigned] : [fullBinding] },
-        clubRuntimes: [],
-        clubRealms: [],
-        frontendHosts: {},
+        clubRuntimes: [routing('club'), ...(enrolled ? [routing('bad'), routing('unassigned')] : [])],
+        clubRealms: [realm('club'), ...(enrolled ? [realm('bad'), realm('unassigned')] : [])],
+        frontendHosts: Object.fromEntries(['club', ...(enrolled ? ['bad','unassigned'] : [])].map(tenant => [`${tenant}.explorer.example`, { publishableKey:'pk_test_Y2x1YiQ=', secretVariable:`EXPLORER_CLUB_${tenant.toUpperCase()}_CLERK_SECRET_KEY` }])),
         platformHosts: ['localhost:3002'],
       },
     },
@@ -349,6 +353,8 @@ test('cold child metadata failures stay scoped, selected retry recovers, and adm
         findOne: async (filter: any) =>
           name === 'tenantDefinitions'
             ? {
+                hostname: `${filter.id}.example`, aliases: [],
+                identityRealm: `https://${filter.id}.clerk.accounts.dev`,
                 configRevision: 3,
                 status: paused ? 'in-rotation' : 'active',
                 secretReferences: {
@@ -455,6 +461,18 @@ test('cold child metadata failures stay scoped, selected retry recovers, and adm
     await manager.refresh();
     assert.ok(badAttempts > 0, 'new database-owned binding must be discovered');
     assert.equal(manager.status()['development/bad']?.state, 'error');
+    const { PublicRealmDirectory } = await import('../src/public-realms.js');
+    const { verifyExplorerSession } = await import('../src/auth.js');
+    const directory = new PublicRealmDirectory(undefined, () => manager.configuration()!);
+    assert.equal(directory.resolve({host:'club.explorer.example'}).club, true);
+    assert.throws(() => directory.resolve({host:'bad.explorer.example'}));
+    assert.throws(() => directory.resolve({host:'unassigned.explorer.example'}));
+    const claims = {iss:realm('bad').issuer,sub:'user_bad',sid:'session',azp:'https://bad.explorer.example',iat:Math.floor(Date.now()/1000),exp:Math.floor(Date.now()/1000)+60};
+    const unsigned = [ {alg:'RS256',typ:'JWT',kid:'fixture'}, claims ].map(v => Buffer.from(JSON.stringify(v)).toString('base64url')).join('.');
+    const bearer = 'Bearer '+ unsigned + '.' + sign('RSA-SHA256',Buffer.from(unsigned),realmKeys.privateKey).toString('base64url');
+    const auth = {issuer:'https://example.clerk.accounts.dev',authorizedParties:['http://localhost:3002'],adminSubjects:['test'],loadClubRealms:()=>manager.configuration()!.clubRealms};
+    await assert.rejects(verifyExplorerSession(auth,bearer));
+    assert.deepEqual(manager.configuration()!.clubRuntimes.map(row => row.tenantId), ['club']);
     assert.equal(manager.status()['development/unassigned'], undefined);
     assert.equal(secrets.tenantSnapshot({environment:'development',tenantId:'unassigned',configRevision:3}), undefined);
     await request(server)
@@ -480,6 +498,9 @@ test('cold child metadata failures stay scoped, selected retry recovers, and adm
     }
     assert.ok(secrets.tenantSnapshot({ environment: 'development', tenantId: 'bad', configRevision: 3 }), 'polling must stage new tenant without a request');
     assert.equal(manager.status()['development/bad']?.state, 'ready');
+    assert.equal(directory.resolve({host:'bad.explorer.example'}).club, true);
+    assert.equal((await verifyExplorerSession(auth,bearer)).issuer, realm('bad').issuer);
+    assert.throws(() => directory.resolve({host:'unassigned.explorer.example'}));
     assert.equal(process.pid, enrollmentPid);
     assert.ok(performance.now() - enrollmentStarted < 4500);
     assert.ok(JSON.stringify({ ...process.env }) === JSON.stringify(untouchedEnvironment), 'enrollment must not mutate process.env');

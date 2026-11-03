@@ -83,6 +83,7 @@ export async function composeApplication(secrets: ExplorerSecrets, diagnostics =
       rootKey.fill(0);
     }
     const currentConfiguration = () => tenantControllers?.configuration() ?? config;
+    const provisioningConfiguration = () => tenantControllers?.provisioningConfiguration() ?? config;
     const vault = new CredentialVault(Buffer.from(key, 'hex'));
     const invitationRepository = new MongoInvitationRepository(
         client,
@@ -98,7 +99,7 @@ export async function composeApplication(secrets: ExplorerSecrets, diagnostics =
       config.setupRuntimes ?? config.clubRuntimes,
       environment.MANAGER_SETUP_CONTROL_KEY,
       undefined,
-      () => currentConfiguration().setupRuntimes ?? currentConfiguration().clubRuntimes,
+      () => provisioningConfiguration().setupRuntimes ?? provisioningConfiguration().clubRuntimes,
     );
     const runtimeMongo = new RuntimeMongoService(
       client,

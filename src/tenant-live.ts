@@ -415,6 +415,11 @@ export async function createTenantControllers(
       throw fail();
     return {
       paused: definition.status === 'in-rotation',
+      registry: {
+        issuer: definition.identityRealm as string | undefined,
+        hostname: definition.hostname as string | undefined,
+        aliases: Array.isArray(definition.aliases) ? definition.aliases as string[] : [],
+      },
       binding: found,
       identity: {
         environment: found.environment,
@@ -592,7 +597,13 @@ export async function createTenantControllers(
     tenantPending.set(id, work);
     return work;
   }
-  let configuration: Awaited<ReturnType<typeof loadExplorerConfiguration>> | undefined;
+  type Configuration = Awaited<ReturnType<typeof loadExplorerConfiguration>>;
+  let configuration: Configuration | undefined;
+  let candidateConfiguration: Configuration | undefined;
+  const admitted = new Map<string, {
+    registry: {issuer: string | undefined; hostname: string | undefined; aliases: string[]};
+    source: Configuration;
+  }>();
   let refreshPending: Promise<void> | undefined;
   async function discoverBindings() {
     // Discovery is exclusively the intersection of published Vault assignments
@@ -605,7 +616,7 @@ export async function createTenantControllers(
       loadExplorerConfiguration(client, database, rootKey),
     ]);
     if (closed) return;
-    configuration = config;
+    candidateConfiguration = config;
     const allowed = new Set(published.tenants.map(
       ({ scope }) => `${scope.environment}/${scope.tenant}`,
     ));
@@ -636,12 +647,73 @@ export async function createTenantControllers(
       }
     }));
   }
+  async function publishRouting() {
+    const candidate = candidateConfiguration;
+    if (!candidate || closed) return;
+    const configured = candidate.keyBindings.bindings as SecretKeyBinding[];
+    const registry = new Map<string, Awaited<ReturnType<typeof authoritative>>['registry']>();
+    await Promise.allSettled(configured.map(async (binding) => {
+      const id = `${binding.environment}/${binding.tenantId}`;
+      try {
+        const current = await authoritative(binding);
+        registry.set(id, current.registry);
+        if (assigned.has(id) && states.get(id)?.state === 'ready' && !current.paused) {
+          admitted.set(id, { registry: current.registry, source: candidate });
+        }
+      } catch { /* Preserve a previously admitted immutable projection on transient failure. */ }
+    }));
+    if (closed) return;
+    for (const id of admitted.keys()) {
+      const binding = bindings.get(id);
+      const snapshot = binding && secrets.tenantSnapshot({ ...binding, configRevision: 0 });
+      if (!assigned.has(id) || !snapshot || !validTenantSnapshot(snapshot)) admitted.delete(id);
+    }
+    const readyIds = new Set(admitted.keys());
+    const previous = configuration;
+    const realms = new Map<string, Configuration['clubRealms'][number]>();
+    const hosts: Configuration['frontendHosts'] = {};
+    for (const [id, view] of admitted) {
+      const issuer = view.registry.issuer;
+      if (!issuer) continue;
+      // A shared issuer's expanded origins cannot advertise an unready owner.
+      const owners = [...registry].filter(([, entry]) => entry.issuer === issuer);
+      const complete = owners.length > 0 && owners.every(([owner]) => readyIds.has(owner));
+      const selected = complete
+        ? view.source.clubRealms.find((realm) => realm.issuer === issuer)
+        : previous?.clubRealms.find((realm) => realm.issuer === issuer);
+      if (!selected) continue;
+      realms.set(issuer, selected);
+      const sourceHosts = complete ? view.source.frontendHosts : previous?.frontendHosts ?? {};
+      const origins = new Set(selected.authorizedParties.map((origin) => new URL(origin).host));
+      for (const [host, metadata] of Object.entries(sourceHosts)) {
+        if (origins.has(host)) hosts[host] = metadata;
+      }
+    }
+    const runtimes: Configuration['clubRuntimes'] = [];
+    const setup: NonNullable<Configuration['setupRuntimes']> = [];
+    const keyBindings: unknown[] = [];
+    for (const [id, view] of admitted) {
+      const owns = (row: {environment: string; tenantId: string}) => `${row.environment}/${row.tenantId}` === id;
+      runtimes.push(...view.source.clubRuntimes.filter((row) => owns(row) &&
+        [view.registry.hostname, ...view.registry.aliases].includes(row.hostname)));
+      setup.push(...(view.source.setupRuntimes ?? view.source.clubRuntimes).filter(owns));
+      keyBindings.push(...view.source.keyBindings.bindings.filter((row) => owns(row as SecretKeyBinding)));
+    }
+    configuration = structuredClone({
+      ...candidate, keyBindings: { version: 1, bindings: keyBindings },
+      clubRuntimes: runtimes, setupRuntimes: setup, clubRealms: [...realms.values()], frontendHosts: hosts,
+    });
+  }
   async function performRefresh() {
     await discoverBindings();
     await mode();
     await Promise.allSettled([...bindings.entries()].filter(([id]) => assigned.has(id)).map(async ([id, binding]) => {
       if (live) return ensureTenant(id);
-      if (secrets.tenantSnapshot({ ...binding, configRevision: 0 })) return;
+      const existing = secrets.tenantSnapshot({ ...binding, configRevision: 0 });
+      if (existing && validTenantSnapshot(existing)) {
+        states.set(id, { state: 'ready' });
+        return;
+      }
       states.set(id, { state: 'loading' });
       try {
         const current = await authoritative(binding);
@@ -652,6 +724,7 @@ export async function createTenantControllers(
         states.set(id, { state: 'error', reason: 'TenantUnavailable' });
       }
     }));
+    await publishRouting();
   }
   function refresh() {
     refreshPending ??= performRefresh().finally(() => {
@@ -818,6 +891,7 @@ export async function createTenantControllers(
       [...states].map(([id, state]) => [id, { ...state }]),
     ),
     configuration: () => configuration ? structuredClone(configuration) : undefined,
+    provisioningConfiguration: () => candidateConfiguration ? structuredClone(candidateConfiguration) : undefined,
     rotationStatus: (environment: string, id: string) =>
       status({ environment, tenantId: id, configRevision: 0 }),
     refresh,
