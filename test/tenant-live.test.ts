@@ -354,7 +354,6 @@ test('cold child metadata failures stay scoped, selected retry recovers, and adm
           name === 'tenantDefinitions'
             ? {
                 hostname: `${filter.id}.example`, aliases: [],
-                identityRealm: `https://${filter.id}.clerk.accounts.dev`,
                 configRevision: 3,
                 status: paused ? 'in-rotation' : 'active',
                 secretReferences: {
@@ -364,7 +363,16 @@ test('cold child metadata failures stay scoped, selected retry recovers, and adm
                       : binding.keyReference,
                 },
               }
-            : makeRow(),
+            : name === 'tenantRuntimeAuthorities'
+              ? {
+                  schema: 1,
+                  tenantId: filter.tenantId,
+                  environment: filter.environment,
+                  configRevision: 3,
+                  status: 'active',
+                  identityRealm: `https://${filter.tenantId}.clerk.accounts.dev`,
+                }
+              : makeRow(),
       }),
     }),
   } as any;

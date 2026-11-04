@@ -387,18 +387,25 @@ export async function createTenantControllers(
   });
   const rootKey = Buffer.from(options.wrappingKey);
   async function authoritative(binding: SecretKeyBinding) {
-    const definition = await client
-      .db(database)
-      .collection('tenantDefinitions')
-      .findOne(
+    const [definition, authority] = await Promise.all([
+      client.db(database).collection('tenantDefinitions').findOne(
         { id: binding.tenantId, environment: binding.environment },
         { maxTimeMS: 3000 },
-      );
+      ),
+      client.db(database).collection('tenantRuntimeAuthorities').findOne(
+        { tenantId: binding.tenantId, environment: binding.environment },
+        { maxTimeMS: 3000 },
+      ),
+    ]);
     if (
       !definition ||
       !Number.isSafeInteger(definition.configRevision) ||
       definition.configRevision < 1 ||
-      definition.secretReferences?.key !== binding.keyReference
+      definition.secretReferences?.key !== binding.keyReference ||
+      !authority || authority.schema !== 1 || authority.status !== 'active' ||
+      authority.tenantId !== binding.tenantId || authority.environment !== binding.environment ||
+      authority.configRevision !== definition.configRevision ||
+      typeof authority.identityRealm !== 'string'
     )
       throw fail();
     const config = await loadExplorerConfiguration(client, database, rootKey);
@@ -416,7 +423,7 @@ export async function createTenantControllers(
     return {
       paused: definition.status === 'in-rotation',
       registry: {
-        issuer: definition.identityRealm as string | undefined,
+        issuer: authority.identityRealm,
         hostname: definition.hostname as string | undefined,
         aliases: Array.isArray(definition.aliases) ? definition.aliases as string[] : [],
       },
