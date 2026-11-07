@@ -1,3 +1,4 @@
+import { createV2IntegrationAdmission, nativeAuthorityReader } from './v2-integration-admission.js';
 import type { ExplorerSecrets } from './secrets.js';
 import { DeletionInventoryResolver } from './deletion/inventory.js';
 import { DeletionService } from './deletion/service.js';
@@ -68,7 +69,7 @@ export async function composeApplication(secrets: ExplorerSecrets, diagnostics =
       await diagnostics.run('database.connect', () => client.connect());
       config = await diagnostics.run('database.configuration', () => loadExplorerConfiguration(client, database, rootKey));
       // Only the decrypted database can register finite tenant controllers.
-      if (secrets.strategy === 'LOCAL_KEYVAULT') {
+      if (secrets.strategy === 'LOCAL_KEYVAULT'&&!environment.VAULT_APPLICATION_ID) {
         tenantControllers = await diagnostics.run('secrets.tenants', () => createTenantControllers({
           secrets, client, database, wrappingKey: rootKey,
           bindings: config.keyBindings.bindings as import('./secrets.js').SecretKeyBinding[],
@@ -157,6 +158,12 @@ export async function composeApplication(secrets: ExplorerSecrets, diagnostics =
         repository: new MongoRepository(client, database),
         vault,
         secretsStrategy: secrets.strategy,
+        integrationAdmission: environment.VAULT_APPLICATION_ID ? createV2IntegrationAdmission({
+          integration: (definition, reference) => secrets.integration({
+            environment: definition.environment, tenantId: definition.id, configRevision: definition.configRevision,
+          }, reference),
+          readAuthority: nativeAuthorityReader(secrets),
+        }) : undefined,
         shutdown: {
           onModuleDestroy: async () => {
             tenantControllers?.close();

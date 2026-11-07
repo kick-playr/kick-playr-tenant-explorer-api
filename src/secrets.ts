@@ -98,6 +98,9 @@ export class ExplorerSecrets implements TenantKeySource {
     readonly processSnapshot?: RuntimeSnapshot,
     private readonly tenantLoader?: TenantSnapshotLoader,
   ) {}
+  integration(_identity: TenantSecretIdentity, _reference: string): import('@kick-playr/local-key-vault/runtime-client/bootstrap').BootstrapValue {
+    throw fail();
+  }
   async initializeTenant(identity: TenantSecretIdentity) {
     if (this.strategy !== 'LOCAL_KEYVAULT') return;
     if (

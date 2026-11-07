@@ -1,0 +1,49 @@
+{
+  "name": "@kick-playr/local-key-vault",
+  "version": "0.1.14",
+  "engines": {
+    "node": ">= 24.x"
+  },
+  "type": "module",
+  "exports": {
+    "./runtime-client": {
+      "types": "./runtime-client/index.d.cts",
+      "require": "./runtime-client/index.cjs",
+      "import": "./runtime-client/index.cjs"
+    },
+    "./runtime-client/tenant-rotation": {
+      "types": "./runtime-client/tenant-rotation.d.cts",
+      "require": "./runtime-client/tenant-rotation.cjs",
+      "import": "./runtime-client/tenant-rotation.cjs"
+    },
+    "./runtime-client/bootstrap": {
+      "types": "./runtime-client/bootstrap.d.cts",
+      "require": "./runtime-client/bootstrap.cjs",
+      "import": "./runtime-client/bootstrap.cjs"
+    },
+    "./runtime-client/server-bootstrap": {
+      "types": "./runtime-client/server-bootstrap.d.cts",
+      "require": "./runtime-client/server-bootstrap.cjs",
+      "import": "./runtime-client/server-bootstrap.cjs"
+    },
+    "./runtime-client/integration-runtime": {
+      "types": "./runtime-client/integration-runtime.d.cts",
+      "require": "./runtime-client/integration-runtime.cjs",
+      "import": "./runtime-client/integration-runtime.cjs"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "runtime-client": [
+        "runtime-client/index.d.ts"
+      ]
+    }
+  },
+  "files": [
+    "runtime-client/"
+  ],
+  "private": true,
+  "dependencies": {
+    "ajv": "^8.20.0"
+  }
+}

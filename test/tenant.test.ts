@@ -451,3 +451,38 @@ test('rotation lifecycle is readable metadata and cannot be set or overridden by
   assert.equal((await service.list({page:1,pageSize:20,status:'in-rotation'})).items[0]?.status,'in-rotation');
   await assert.rejects(service.update('development','winikon',{expectedRevision:1,status:'active'},actor),/rotation/i);
 });
+
+ test('v2 integration enabling admits native authority without control credential copies', async () => {
+  const { repository, vault } = fixture();
+  let admitted = false;
+  const service = new TenantService(repository, vault, undefined, 'LOCAL_KEYVAULT', undefined,
+    async (definition, integrationId, connection) => {
+      assert.equal(definition.id, 'winikon');
+      assert.equal(integrationId, 'bexio');
+      assert.equal(connection.credentialId, 'bexio');
+      admitted = true;
+    });
+  await service.create(input(), actor);
+  const result = await service.putIntegration('development', 'winikon', 'bexio', {
+    expectedRevision: 1, provider: 'bexio', label: 'Accounting', accountReference: 'account',
+    capabilities: [], credentialId: 'bexio', enabled: true,
+  }, actor);
+  assert.equal(admitted, true);
+  assert.equal(result.integrations[0]?.enabled, true);
+  assert.deepEqual((await repository.read('development', 'winikon'))?.metadata.credentials, []);
+});
+
+test('native authority rejection cannot fall back to a legacy control credential', async () => {
+  const { repository, vault, service: legacy } = fixture();
+  await legacy.create(input(), actor);
+  await legacy.putCredential('development', 'winikon', 'bexio', { expectedRevision: 1, label: 'Old', value: 'legacy-token' }, actor);
+  const service = new TenantService(repository, vault, undefined, 'LOCAL_KEYVAULT', undefined,
+    async () => { throw new Error('native authority unavailable'); });
+  await assert.rejects(service.putIntegration('development', 'winikon', 'bexio', {
+    expectedRevision: 2, provider: 'bexio', label: 'Accounting', accountReference: 'account',
+    capabilities: [], credentialId: 'bexio', enabled: true,
+  }, actor), /native authority unavailable/);
+  const saved = await repository.read('development', 'winikon');
+  assert.equal(saved?.definition.configRevision, 2);
+  assert.deepEqual(saved?.metadata.integrations, []);
+});

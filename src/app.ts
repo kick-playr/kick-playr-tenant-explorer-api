@@ -114,6 +114,7 @@ class PublicRealmController {
 }
 
 export interface AppOptions {
+  integrationAdmission?: import('./tenant.service.js').IntegrationAdmission;
   keyRotationStatus?: (environment:string,id:string)=>Promise<unknown>;
   tenantAdmission?: import('express').RequestHandler;
   secretsStrategy?: 'ENV_VARIABLES' | 'LOCAL_KEYVAULT';
@@ -279,6 +280,7 @@ export async function createApp(
             options.keyFiles,
             options.secretsStrategy,
             options.keyRotationStatus,
+            options.integrationAdmission,
           ),
       },
       {

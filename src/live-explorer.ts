@@ -1,3 +1,4 @@
+import {createV2Explorer} from './v2-bootstrap.js';
 import {
   createApplicationRuntime,
   createSecretsRuntime,
@@ -54,6 +55,7 @@ export function createLiveExplorer(
   environmentInput: NodeJS.ProcessEnv,
   options: LiveExplorerOptions,
 ) {
+  if(environmentInput.VAULT_APPLICATION_ID)return createV2Explorer(environmentInput,options);
   const environment = { ...environmentInput };
   const strategy = environment.SECRETS_KEYS_STRATEGY ?? 'ENV_VARIABLES';
   const operationTimeoutMs = options.operationTimeoutMs ?? 30000;

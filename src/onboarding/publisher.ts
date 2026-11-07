@@ -1,8 +1,32 @@
+import { isDeepStrictEqual } from 'node:util';
+import { assertRuntimeDatabase } from '@kick-playr/local-key-vault/runtime-client/integration-runtime';
 import { ConflictException, ForbiddenException } from '@nestjs/common';
 import type { ClientSession, Document, MongoClient } from 'mongodb';
 import type { InvitationState } from '../invitations/types.js';
 import { tenantPermissionCatalog } from '../tenant-permissions.js';
 import type { RuntimePublication } from './types.js';
+/** A native proof locks the sole token authority without opening or resealing its value. */
+function validNativeFence(source: Document, definition: Document, accountReference: string): boolean {
+  try { assertRuntimeDatabase(source.database, definition.id); } catch { return false; }
+  const row = source.expected, next = source.replacement;
+  if (!row || !next || row._id !== `${definition.environment}/${row.integrationId}` ||
+    row.tenantId !== definition.id || row.environment !== definition.environment ||
+    typeof row.integrationId !== 'string' || !row.integrationId ||
+    typeof row.staticVersion !== 'string' || !row.staticVersion ||
+    row.accountReference !== accountReference || row.status !== 'active' || row.operation !== null ||
+    !Number.isSafeInteger(row.authorityGeneration) || row.authorityGeneration < 1 ||
+    !Number.isSafeInteger(row.revision) || row.revision < 1 ||
+    row.value?.format !== 1 || ['keyVersion', 'iv', 'tag', 'ciphertext'].some(k => typeof row.value?.[k] !== 'string' || !row.value[k]) ||
+    row.metadata?.schema !== 1 || row.metadata.connectionId !== 'bexio' ||
+    row.metadata.provider !== 'bexio' || row.metadata.purpose !== 'oauth' ||
+    !Number.isSafeInteger(row.metadata.securityEpoch) || row.metadata.securityEpoch < 1 ||
+    !Array.isArray(row.metadata.capabilities) || row.metadata.capabilities.some((v: unknown) => typeof v !== 'string') ||
+    typeof next.setupProofFence !== 'string' || !/^[a-f0-9]{64}$/.test(next.setupProofFence) || next.setupProofFence === row.setupProofFence)
+    return false;
+  const { setupProofFence: oldFence, ...expected } = row;
+  const { setupProofFence: newFence, ...replacement } = next;
+  return isDeepStrictEqual(expected, replacement);
+}
 /** Called only inside the invitation store's snapshot/majority transaction. No provider I/O. */
 export async function publishManagerRuntime(
   client: MongoClient,
@@ -70,16 +94,18 @@ export async function publishManagerRuntime(
     proof.sources.length !== 2
   )
     throw new ConflictException('Einrichtungsprüfung abgelaufen oder geändert');
-  if (new Set(proof.sources.map((s: Document) => s.collection)).size !== 2)
+  if (new Set(proof.sources.map((s: Document) => s.collection)).size !== 2 ||
+    !proof.sources.some((s: Document) => s.collection === 'settings'))
     throw new ConflictException('Ungültige Einrichtungsprüfung');
   for (const source of proof.sources) {
     authorized();
     if (
       !/^[A-Za-z0-9_-]{1,63}$/.test(source.database) ||
       source.database === database ||
-      !['settings', 'integration_sessions'].includes(source.collection) ||
+      !['settings', 'integration_sessions', 'integration_runtime_credentials'].includes(source.collection) ||
       !source.expected ||
       !source.replacement ||
+      (source.collection === 'integration_runtime_credentials' ? !validNativeFence(source, definition, input.accountReference) : (
       !source.expected.envelope ||
       !source.replacement.envelope ||
       JSON.stringify(source.expected.envelope) ===
@@ -89,10 +115,10 @@ export async function publishManagerRuntime(
         (source.expected.id !== 42 ||
           source.expected.hash !== source.replacement.hash)) ||
       (source.collection === 'integration_sessions' &&
-        source.expected.revision !== source.replacement.revision)
+        source.expected.revision !== source.replacement.revision)))
     )
       throw new ConflictException('Ungültige Einrichtungsprüfung');
-    // Fresh authenticated ciphertext makes this a real write lock, not a no-op read fence.
+    // Fresh ciphertext or a native setupProofFence makes this a real write lock.
     // The exact old encrypted document is the predicate, so concurrent config changes conflict.
     const result = await client
       .db(source.database)

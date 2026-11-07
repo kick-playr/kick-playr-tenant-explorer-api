@@ -28,6 +28,8 @@ import { CredentialVault } from './vault.js';
 import { KeyFileRegistry } from './key-files.js';
 import { expandTenantPermissions } from './tenant-permissions.js';
 
+export type IntegrationAdmission = (definition: Definition, integrationId: string, connection: Omit<import('./contracts.js').Integration, 'id' | 'updatedAt'>) => Promise<void>;
+
 export class TenantService {
   constructor(
     private readonly repository: Repository,
@@ -36,6 +38,7 @@ export class TenantService {
     private readonly secretsStrategy:
       'ENV_VARIABLES' | 'LOCAL_KEYVAULT' = 'ENV_VARIABLES',
     private readonly rotationStatus?: (environment:string,id:string)=>Promise<unknown>,
+    private readonly integrationAdmission?: IntegrationAdmission,
   ) {}
   private key(environment: string, id: string) {
     parse(environmentSchema, environment);
@@ -162,7 +165,7 @@ export class TenantService {
     expected: number,
     actor: string,
     action: string,
-    edit: (a: Aggregate) => void,
+    edit: (a: Aggregate) => void | Promise<void>,
     resource?: string,
     expectedAuthorityRevision?: number,
   ) {
@@ -190,7 +193,7 @@ export class TenantService {
           Number.MAX_SAFE_INTEGER - 1
       )
         throw new ConflictException('Tenant revision exhausted');
-      edit(aggregate);
+      await edit(aggregate);
       this.hosts(aggregate.definition);
       // Grant generations revoke access without rebinding encrypted club data.
       if (expectedAuthorityRevision === undefined)
@@ -439,9 +442,12 @@ export class TenantService {
       expectedRevision,
       actor,
       'integration.updated',
-      (a) => {
+      async (a) => {
+        if (connection.enabled && this.integrationAdmission)
+          await this.integrationAdmission(a.definition, connectionId, connection);
         if (
           connection.enabled &&
+          !this.integrationAdmission &&
           !a.metadata.credentials.some(
             (c) => c.id === connection.credentialId && c.status === 'active',
           )

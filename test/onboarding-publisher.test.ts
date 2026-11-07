@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { publishManagerRuntime } from '../src/onboarding/publisher.js';
-test('publisher fences encrypted source generations and atomically writes authority in caller transaction', async () => {
+for (const native of [false, true]) test(`publisher fences ${native ? 'native runtime authority' : 'legacy encrypted session'} and atomically writes authority in caller transaction`, async () => {
   const writes: { name: string; operation: string; options: unknown }[] = [];
   const session = {};
   const principal = {
@@ -67,6 +67,17 @@ test('publisher fences encrypted source generations and atomically writes author
       },
     ],
   };
+  if (native) {
+    const expected = {
+      _id: 'development/resource-bexio', tenantId: 'club', environment: 'development',
+      integrationId: 'resource-bexio', status: 'active', operation: null,
+      staticVersion: 'static-v1', accountReference: 'account', authorityGeneration: 2, revision: 3,
+      metadata: { schema: 1, connectionId: 'bexio', provider: 'bexio', purpose: 'oauth', capabilities: ['contacts:read'], securityEpoch: 1 },
+      value: { format: 1, keyVersion: 'v1', iv: 'iv', tag: 'tag', ciphertext: 'opaque' },
+    };
+    proof.sources[1] = { database: 'club-kick-playr', collection: 'integration_runtime_credentials',
+      expected, replacement: { ...expected, setupProofFence: 'a'.repeat(64) } } as never;
+  }
   const client = {
     db: (database: string) => ({
       collection: (name: string) => ({
@@ -112,6 +123,30 @@ test('publisher fences encrypted source generations and atomically writes author
       (w) => (w.options as { session: unknown }).session === session,
     ),
   );
+  if (native) {
+    const original = structuredClone(proof.sources[1]) as any;
+    const corruptions = [
+      (s: any) => { s.database = 'control-kick-playr'; },
+      (s: any) => { s.expected.tenantId = 'other'; s.replacement.tenantId = 'other'; },
+      (s: any) => { s.expected.status = 'revoked'; s.replacement.status = 'revoked'; },
+      (s: any) => { s.expected.operation = { phase: 'dispatched' }; s.replacement.operation = { phase: 'dispatched' }; },
+      (s: any) => { s.replacement.value = { ...s.replacement.value, ciphertext: 'changed' }; },
+      (s: any) => { s.replacement.authorityGeneration++; },
+      (s: any) => { s.replacement.setupProofFence = 'bad'; },
+      (s: any) => { s.expected.metadata.provider = 'dropbox'; s.replacement.metadata.provider = 'dropbox'; },
+    ];
+    for (const corrupt of corruptions) {
+      const source = structuredClone(original);
+      corrupt(source);
+      proof.sources[1] = source;
+      writes.length = 0;
+      await assert.rejects(publishManagerRuntime(client as never, 'control', session as never,
+        definition, authority, { revision: 1, invitations: [], principals: [principal],
+          owner: { issuer: principal.issuer, subject: principal.subject } }, input));
+      assert.equal(writes.some(w => w.name === 'tenantRuntimeAuthorities'), false);
+    }
+    proof.sources[1] = original;
+  }
   current = false;
   writes.length = 0;
   await assert.rejects(

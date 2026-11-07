@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@clerk/backend": "^3.26.5",
-    "@kick-playr/local-key-vault": "git+https://github.com/kick-playr/key-vault-api.git#e5f0c384193fd0049a5193b95b3061b5bfe206ea",
+    "@kick-playr/local-key-vault": "file:vendor/local-key-vault-runtime",
     "@nestjs/common": "^12.3.2",
     "@nestjs/core": "^12.3.2",
     "@nestjs/platform-express": "^12.3.2",

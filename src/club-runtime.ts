@@ -1,4 +1,5 @@
 import { isCatalogMappingRoute } from './catalog-policy.js';
+import { oauthCallbackPath } from './oauth-callback.js';
 import {
   BadRequestException,
   HttpException,
@@ -58,7 +59,19 @@ export class ClubRuntime {
       return new ClubRuntime(this.loadBindings(), this.transport)
         .request(tenant, session, method, path, body);
     }
-    if (!(
+    let callback = false;
+    if (method === 'GET' && /^(\/bexio\/oauth\/callback|\/dropbox\/authorize)\?/.test(path)) {
+      try {
+        const url = new URL(path, 'http://callback.invalid');
+        const query: Record<string,string> = {};
+        for (const [key,value] of url.searchParams) {
+          if (key in query) throw Error();
+          query[key]=value;
+        }
+        callback = oauthCallbackPath(url.pathname.startsWith('/bexio/') ? 'bexio' : 'dropbox', query) === path;
+      } catch { throw new BadRequestException('Invalid OAuth callback'); }
+    }
+    if (!(callback ||
       (path === '/api/settings' && ['GET', 'PATCH'].includes(method)) ||
       (path === '/api/settings/branding' && method === 'GET') ||
       isCatalogMappingRoute(method, path) ||

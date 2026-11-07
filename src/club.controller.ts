@@ -1,4 +1,5 @@
 import { isCatalogMappingRoute } from './catalog-policy.js';
+import { oauthCallbackPath } from './oauth-callback.js';
 import {
   BadRequestException,
   ForbiddenException,
@@ -217,6 +218,29 @@ export class ClubController {
         : provider === 'dropbox'
           ? '/dropbox/signin'
           : '/invalid',
-    );
+    ).then((result: any) => {
+      if (e === 'development') {
+        const url = new URL(result.url);
+        if (!['https://auth.bexio.com','https://www.dropbox.com'].includes(url.origin) || !/^oauth1\.[A-Za-z0-9_-]{43}$/.test(url.searchParams.get('state') ?? '')) throw new BadRequestException('Invalid authorization URL');
+        url.searchParams.set('state','explorer.'+url.searchParams.get('state'));
+        return {...result,url:url.href};
+      }
+      return result;
+    });
+  }
+  @Get(':environment/:id/integrations/:provider/callback') async callback(
+    @Req() r: PlatformRequest,
+    @Param('environment') e: string,
+    @Param('id') id: string,
+    @Param('provider') provider: string,
+  ) {
+    let path: string;
+    try { path = oauthCallbackPath(provider,r.query); }
+    catch { throw new BadRequestException('Invalid OAuth callback'); }
+    const tenant = await this.clubs.require(e,id,r.explorerSession);
+    await this.clubs.audit(tenant,r.explorerSession,'club.settings.intent');
+    const result = await this.runtime.request(tenant,r.explorerSession,'GET',path);
+    await this.clubs.audit(tenant,r.explorerSession,'club.settings.completed');
+    return result;
   }
 }
