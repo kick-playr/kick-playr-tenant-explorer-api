@@ -300,3 +300,32 @@ test('club routing adopts only refreshed trusted destinations without replacing 
   );
   assert.equal(calls, 1);
 });
+
+test('chat administration forwards only exact read and creation operations to the tenant', async () => {
+  const seen: string[] = [];
+  const runtime = new ClubRuntime(bindings, async (url) => { seen.push(String(url)); return Response.json({ ok: true }); });
+  for (const path of ['/api/settings/chat/status', '/api/settings/chat/spaces']) await runtime.request(tenant, session, 'GET', path);
+  await runtime.request(tenant, session, 'POST', '/api/settings/chat/spaces', { suffix: 'Trainer' });
+  await assert.rejects(runtime.request(tenant, session, 'POST', '/api/settings/chat/status', {}));
+  await assert.rejects(runtime.request(tenant, session, 'GET', '/api/settings/chat/spaces/foreign'));
+  assert.equal(seen.length, 3);
+});
+test('SMTP test is a single fixed tenant POST with no credential forwarding',async()=>{
+ const calls:{url:string;init:RequestInit}[]=[];
+ const runtime=new ClubRuntime(bindings,async(url,init)=>{calls.push({url:String(url),init:init!});return Response.json({status:'accepted'});});
+ const body={expectedRevision:'r1',resourceId:'smtp-resource',versionId:'v1',recipient:'recipient@club.ch'};
+ assert.deepEqual(await runtime.request(tenant,session,'POST','/api/settings/integrations/smtp/test-email',body),{status:'accepted'});
+ assert.equal(calls.length,1);assert.ok(calls[0]!.url.endsWith('/api/settings/integrations/smtp/test-email'));
+ assert.equal(calls[0]!.init.method,'POST');assert.deepEqual(JSON.parse(calls[0]!.init.body as string),body);
+ await assert.rejects(runtime.request(tenant,session,'GET','/api/settings/integrations/smtp/test-email'));
+ assert.equal(calls.length,1);
+});
+test('mailbox test forwards exactly one tenant POST without a recipient or credentials',async()=>{
+ const calls:RequestInit[]=[];
+ const runtime=new ClubRuntime(bindings,async(url,init)=>{assert.ok(String(url).endsWith('/integrations/imap/test-mailbox'));calls.push(init!);return Response.json({status:'connected',folders:[]});});
+ const body={expectedRevision:'r1',resourceId:'imap-resource',versionId:'v1'};
+ await runtime.request(tenant,session,'POST','/api/settings/integrations/imap/test-mailbox',body);
+ assert.equal(calls.length,1);assert.deepEqual(JSON.parse(calls[0]!.body as string),body);
+ await assert.rejects(runtime.request(tenant,session,'GET','/api/settings/integrations/imap/test-mailbox'));
+ assert.equal(calls.length,1);
+});

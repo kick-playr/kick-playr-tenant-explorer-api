@@ -90,9 +90,12 @@ export class ClubRuntime {
       callback ||
       (path === '/api/settings' && ['GET', 'PATCH'].includes(method)) ||
       (path === '/api/settings/branding' && method === 'GET') ||
+      (['/api/settings/chat/status', '/api/settings/chat/spaces'].includes(path) && method === 'GET') ||
+      (path === '/api/settings/chat/spaces' && method === 'POST') ||
       isCatalogMappingRoute(method, path) ||
       isClubTeamRoute(method, path) ||
       (path === '/api/settings/integrations' && method === 'GET') ||
+      (/^\/api\/settings\/integrations\/[a-z0-9][a-z0-9-]{0,63}\/(?:test-email|test-mailbox)$/.test(path) && method === 'POST') ||
       (/^\/api\/settings\/integrations\/[a-z0-9][a-z0-9-]{0,63}$/.test(path) &&
         ['PUT', 'PATCH'].includes(method)) ||
       (['/bexio/oauth/signin', '/dropbox/signin'].includes(path) &&
@@ -124,7 +127,7 @@ export class ClubRuntime {
         body: raw,
         redirect: 'error',
         cache: 'no-store',
-        signal: AbortSignal.timeout(15000),
+        signal: AbortSignal.timeout(method === 'POST' && /^\/api\/settings\/integrations\/[a-z0-9][a-z0-9-]{0,63}\/(?:test-email|test-mailbox)$/.test(path) ? 90000 : 15000),
         headers: {
           Authorization: 'Bearer ' + session.token,
           Host: binding.hostname,

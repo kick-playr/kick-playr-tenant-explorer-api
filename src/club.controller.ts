@@ -129,6 +129,17 @@ export class ClubController {
   ) {
     return this.forward(r, e, id, 'PATCH', '/api/settings', body);
   }
+  @Get(':environment/:id/chat/:operation') chat(
+    @Req() r: PlatformRequest, @Param('environment') e: string,
+    @Param('id') id: string, @Param('operation') operation: string,
+  ) {
+    if (!['status', 'spaces'].includes(operation)) throw new BadRequestException('Invalid chat operation');
+    return this.forward(r, e, id, 'GET', '/api/settings/chat/' + operation);
+  }
+  @Post(':environment/:id/chat/spaces') createSpaces(
+    @Req() r: PlatformRequest, @Param('environment') e: string,
+    @Param('id') id: string, @Body() body: unknown,
+  ) { return this.forward(r, e, id, 'POST', '/api/settings/chat/spaces', body); }
   @Get(':environment/:id/catalog/:collection') catalog(
     @Req() r: PlatformRequest,
     @Param('environment') e: string,
@@ -262,6 +273,25 @@ export class ClubController {
       `/api/settings/integrations/${connectionId}`,
       body,
     );
+  }
+  // Approved audience: Explorer and Club administrators with an active tenant grant.
+  @Post(':environment/:id/integrations/:connectionId/test-mailbox') testMailbox(
+    @Req() r: PlatformRequest,
+    @Param('environment') e: string,
+    @Param('id') id: string,
+    @Param('connectionId') connectionId: string,
+    @Body() body: unknown,
+  ) {
+    return this.forward(r,e,id,'POST',`/api/settings/integrations/${connectionId}/test-mailbox`,body);
+  }
+  @Post(':environment/:id/integrations/:connectionId/test-email') testEmail(
+    @Req() r: PlatformRequest,
+    @Param('environment') e: string,
+    @Param('id') id: string,
+    @Param('connectionId') connectionId: string,
+    @Body() body: unknown,
+  ) {
+    return this.forward(r,e,id,'POST',`/api/settings/integrations/${connectionId}/test-email`,body);
   }
   @Patch(':environment/:id/integrations/:connectionId') state(
     @Req() r: PlatformRequest,
