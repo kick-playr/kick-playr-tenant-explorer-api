@@ -163,6 +163,83 @@ export class ClubController {
       body,
     );
   }
+  @Get(':environment/:id/teams') teams(
+    @Req() r: PlatformRequest,
+    @Param('environment') e: string,
+    @Param('id') id: string,
+  ) {
+    return this.forward(r, e, id, 'GET', '/api/settings/teams');
+  }
+  @Get(':environment/:id/teams/readiness') teamReadiness(
+    @Req() r: PlatformRequest,
+    @Param('environment') e: string,
+    @Param('id') id: string,
+  ) {
+    return this.forward(r, e, id, 'GET', '/api/settings/teams/readiness');
+  }
+  @Post(':environment/:id/teams/create') createTeam(
+    @Req() r: PlatformRequest,
+    @Param('environment') e: string,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ) {
+    return this.forward(r, e, id, 'POST', '/api/settings/teams/create', body);
+  }
+  @Post(':environment/:id/teams/operations/:operationKey/resume') resumeTeam(
+    @Req() r: PlatformRequest,
+    @Param('environment') e: string,
+    @Param('id') id: string,
+    @Param('operationKey') key: string,
+    @Body() body: unknown,
+  ) {
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        key,
+      )
+    )
+      throw new BadRequestException('Invalid operation key');
+    return this.forward(
+      r,
+      e,
+      id,
+      'POST',
+      `/api/settings/teams/operations/${key}/resume`,
+      body,
+    );
+  }
+  @Post(':environment/:id/teams/:categoryId/refresh') refreshTeam(
+    @Req() r: PlatformRequest,
+    @Param('environment') e: string,
+    @Param('id') id: string,
+    @Param('categoryId') categoryId: string,
+    @Body() body: unknown,
+  ) {
+    if (!/^[1-9][0-9]*$/.test(categoryId))
+      throw new BadRequestException('Invalid category');
+    return this.forward(
+      r,
+      e,
+      id,
+      'POST',
+      `/api/settings/teams/${categoryId}/refresh`,
+      body,
+    );
+  }
+  @Put(':environment/:id/catalog/categories/team-seasons') teamSeasons(
+    @Req() r: PlatformRequest,
+    @Param('environment') e: string,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ) {
+    return this.forward(
+      r,
+      e,
+      id,
+      'PUT',
+      '/api/settings/catalog/categories/team-seasons',
+      body,
+    );
+  }
   @Get(':environment/:id/integrations') integrations(
     @Req() r: PlatformRequest,
     @Param('environment') e: string,
@@ -221,9 +298,20 @@ export class ClubController {
     ).then((result: any) => {
       if (e === 'development') {
         const url = new URL(result.url);
-        if (!['https://auth.bexio.com','https://www.dropbox.com'].includes(url.origin) || !/^oauth1\.[A-Za-z0-9_-]{43}$/.test(url.searchParams.get('state') ?? '')) throw new BadRequestException('Invalid authorization URL');
-        url.searchParams.set('state','explorer.'+url.searchParams.get('state'));
-        return {...result,url:url.href};
+        if (
+          !['https://auth.bexio.com', 'https://www.dropbox.com'].includes(
+            url.origin,
+          ) ||
+          !/^oauth1\.[A-Za-z0-9_-]{43}$/.test(
+            url.searchParams.get('state') ?? '',
+          )
+        )
+          throw new BadRequestException('Invalid authorization URL');
+        url.searchParams.set(
+          'state',
+          'explorer.' + url.searchParams.get('state'),
+        );
+        return { ...result, url: url.href };
       }
       return result;
     });
@@ -235,12 +323,24 @@ export class ClubController {
     @Param('provider') provider: string,
   ) {
     let path: string;
-    try { path = oauthCallbackPath(provider,r.query); }
-    catch { throw new BadRequestException('Invalid OAuth callback'); }
-    const tenant = await this.clubs.require(e,id,r.explorerSession);
-    await this.clubs.audit(tenant,r.explorerSession,'club.settings.intent');
-    const result = await this.runtime.request(tenant,r.explorerSession,'GET',path);
-    await this.clubs.audit(tenant,r.explorerSession,'club.settings.completed');
+    try {
+      path = oauthCallbackPath(provider, r.query);
+    } catch {
+      throw new BadRequestException('Invalid OAuth callback');
+    }
+    const tenant = await this.clubs.require(e, id, r.explorerSession);
+    await this.clubs.audit(tenant, r.explorerSession, 'club.settings.intent');
+    const result = await this.runtime.request(
+      tenant,
+      r.explorerSession,
+      'GET',
+      path,
+    );
+    await this.clubs.audit(
+      tenant,
+      r.explorerSession,
+      'club.settings.completed',
+    );
     return result;
   }
 }

@@ -24,13 +24,28 @@ test('OAuth callback uses the current Explorer bearer and an exact callback allo
   const calls: string[] = [];
   const runtime = new ClubRuntime(bindings, async (url, init) => {
     calls.push(String(url));
-    assert.equal((init!.headers as Record<string,string>).Authorization, 'Bearer signed-token');
-    return Response.json({connected:true});
+    assert.equal(
+      (init!.headers as Record<string, string>).Authorization,
+      'Bearer signed-token',
+    );
+    return Response.json({ connected: true });
   });
-  const path='/bexio/oauth/callback?state=oauth1.'+'a'.repeat(43)+'&code=code&iss=https%3A%2F%2Fauth.bexio.com%2Frealms%2Fbexio';
-  assert.deepEqual(await runtime.request(tenant,session,'GET',path),{connected:true});
-  await assert.rejects(runtime.request(tenant,session,'GET',path+'&redirect_uri=https://evil.example'));
-  assert.equal(calls.length,1);
+  const path =
+    '/bexio/oauth/callback?state=oauth1.' +
+    'a'.repeat(43) +
+    '&code=code&iss=https%3A%2F%2Fauth.bexio.com%2Frealms%2Fbexio';
+  assert.deepEqual(await runtime.request(tenant, session, 'GET', path), {
+    connected: true,
+  });
+  await assert.rejects(
+    runtime.request(
+      tenant,
+      session,
+      'GET',
+      path + '&redirect_uri=https://evil.example',
+    ),
+  );
+  assert.equal(calls.length, 1);
 });
 test('club bridge sends only the current user bearer to a fixed tenant proxy and preserves conflicts', async () => {
   const calls: { url: string; init: RequestInit }[] = [];
@@ -180,7 +195,6 @@ test('forwards only catalog reads and general label mappings, preserving revisio
     '/api/settings/catalog/categories/teams',
     '/api/settings/catalog/categories/coaches1418',
     '/api/settings/catalog/branches/player-trainers',
-    '/api/settings/catalog/categories/team-seasons',
     '/api/settings/catalog/categories/flags/isTeam',
     '/api/settings/catalog/branches/flags/unknown',
     '/api/settings/catalog/branches/flags/isKiosk',
@@ -260,10 +274,29 @@ test('branding projection is a read-only tenant-bound operation', async () => {
 test('club routing adopts only refreshed trusted destinations without replacing the runtime', async () => {
   let configured: unknown[] = [];
   let calls = 0;
-  const runtime = new (ClubRuntime as any)([], async () => { calls++; return Response.json({ok:true}); }, () => configured) as ClubRuntime;
-  await assert.rejects(runtime.request(tenant, session, 'GET', '/api/settings'));
+  const runtime = new (ClubRuntime as any)(
+    [],
+    async () => {
+      calls++;
+      return Response.json({ ok: true });
+    },
+    () => configured,
+  ) as ClubRuntime;
+  await assert.rejects(
+    runtime.request(tenant, session, 'GET', '/api/settings'),
+  );
   configured = bindings;
-  assert.deepEqual(await runtime.request(tenant, session, 'GET', '/api/settings'), {ok:true});
-  await assert.rejects(runtime.request({...tenant, id:'unknown'}, session, 'GET', '/api/settings'));
+  assert.deepEqual(
+    await runtime.request(tenant, session, 'GET', '/api/settings'),
+    { ok: true },
+  );
+  await assert.rejects(
+    runtime.request(
+      { ...tenant, id: 'unknown' },
+      session,
+      'GET',
+      '/api/settings',
+    ),
+  );
   assert.equal(calls, 1);
 });
