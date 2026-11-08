@@ -1,3 +1,4 @@
+import { safeChatFailure } from './chat-failure.js';
 import { isClubTeamRoute } from './team-policy.js';
 import { isCatalogMappingRoute } from './catalog-policy.js';
 import { oauthCallbackPath } from './oauth-callback.js';
@@ -91,7 +92,10 @@ export class ClubRuntime {
       (path === '/api/settings' && ['GET', 'PATCH'].includes(method)) ||
       (path === '/api/settings/branding' && method === 'GET') ||
       (['/api/settings/chat/status', '/api/settings/chat/spaces'].includes(path) && method === 'GET') ||
-      (path === '/api/settings/chat/spaces' && method === 'POST') ||
+      (['/api/settings/chat/spaces', '/api/settings/chat/rooms'].includes(path) && method === 'POST') ||
+      (path === '/api/settings/chat/team-rooms' && method === 'GET') ||
+      (/^\/api\/settings\/chat\/team-rooms\/[1-9][0-9]*\/create$/.test(path) && method === 'POST') ||
+      (/^\/api\/settings\/chat\/team-rooms\/[1-9][0-9]*$/.test(path) && method === 'PUT') ||
       isCatalogMappingRoute(method, path) ||
       isClubTeamRoute(method, path) ||
       (path === '/api/settings/integrations' && method === 'GET') ||
@@ -142,6 +146,10 @@ export class ClubRuntime {
         throw Error();
       }
       if (!response.ok) {
+        if ((['/api/settings/chat/spaces','/api/settings/chat/rooms'].includes(path) || /^\/api\/settings\/chat\/team-rooms\/[1-9][0-9]*(?:\/create)?$/.test(path)) && ['POST','PUT'].includes(method) && [409,429].includes(response.status)) {
+          const safe=await safeChatFailure(response);
+          throw new HttpException({...safe,statusCode:response.status},response.status);
+        }
         await response.body?.cancel();
         const status = [400, 401, 403, 404, 409, 413, 429].includes(
           response.status,

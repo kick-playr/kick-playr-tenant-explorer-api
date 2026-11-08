@@ -203,6 +203,14 @@ test('club discovery and reads are tenant scoped; platform routes stay operator 
       repository.rows.set('development/winikon', structuredClone(original));
     }
     assert.equal(forwarded.length, 2);
+    const matrixPath='/api/club/tenants/development/winikon/chat/team-rooms';
+    await http.get(matrixPath).set('Authorization',token('user_operator')).expect(403);
+    const tenantAuthority=repository.rows.get('development/winikon')!.authority!;
+    tenantAuthority.users.push({...structuredClone(tenantAuthority.users[0]!),subject:'user_operator'});
+    for(const subject of ['user_club','user_operator'])await http.get(matrixPath).set('Authorization',token(subject)).expect(200);
+    await http.get(matrixPath).set('Authorization',token('user_member')).expect(403);
+    await http.get('/api/club/tenants/development/uster/chat/team-rooms').set('Authorization',token('user_operator')).expect(403);
+    assert.equal(forwarded.length,4);
     repository.rows.get('development/winikon')!.authority!.users[0]!.status =
       'revoked';
     await http

@@ -133,13 +133,23 @@ export class ClubController {
     @Req() r: PlatformRequest, @Param('environment') e: string,
     @Param('id') id: string, @Param('operation') operation: string,
   ) {
-    if (!['status', 'spaces'].includes(operation)) throw new BadRequestException('Invalid chat operation');
+    if (!['status', 'spaces', 'team-rooms'].includes(operation)) throw new BadRequestException('Invalid chat operation');
     return this.forward(r, e, id, 'GET', '/api/settings/chat/' + operation);
   }
   @Post(':environment/:id/chat/spaces') createSpaces(
     @Req() r: PlatformRequest, @Param('environment') e: string,
     @Param('id') id: string, @Body() body: unknown,
   ) { return this.forward(r, e, id, 'POST', '/api/settings/chat/spaces', body); }
+  @Post(':environment/:id/chat/rooms') createRooms(
+    @Req() r: PlatformRequest, @Param('environment') e: string,
+    @Param('id') id: string, @Body() body: unknown,
+  ) { return this.forward(r, e, id, 'POST', '/api/settings/chat/rooms', body); }
+  @Post(':environment/:id/chat/team-rooms/:teamId/create') createTeamMatrixRooms(
+    @Req() r:PlatformRequest,@Param('environment') e:string,@Param('id') id:string,@Param('teamId') teamId:string,@Body() body:unknown,
+  ) { if(!/^[1-9][0-9]*$/.test(teamId))throw new BadRequestException('Invalid team');return this.forward(r,e,id,'POST',`/api/settings/chat/team-rooms/${teamId}/create`,body); }
+  @Put(':environment/:id/chat/team-rooms/:teamId') saveTeamMatrixRooms(
+    @Req() r:PlatformRequest,@Param('environment') e:string,@Param('id') id:string,@Param('teamId') teamId:string,@Body() body:unknown,
+  ) { if(!/^[1-9][0-9]*$/.test(teamId))throw new BadRequestException('Invalid team');return this.forward(r,e,id,'PUT',`/api/settings/chat/team-rooms/${teamId}`,body); }
   @Get(':environment/:id/catalog/:collection') catalog(
     @Req() r: PlatformRequest,
     @Param('environment') e: string,

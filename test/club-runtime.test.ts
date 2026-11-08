@@ -329,3 +329,27 @@ test('mailbox test forwards exactly one tenant POST without a recipient or crede
  await assert.rejects(runtime.request(tenant,session,'GET','/api/settings/integrations/imap/test-mailbox'));
  assert.equal(calls.length,1);
 });
+
+ test('static room creation forwards only the exact POST route', async () => {
+ const runtime = new ClubRuntime(bindings, async () => Response.json({roomId:'!room:example.org'}));
+ assert.deepEqual(await runtime.request(tenant,session,'POST','/api/settings/chat/rooms',{key:'matrixAdminRoomId',roomId:''}),{roomId:'!room:example.org'});
+ await assert.rejects(runtime.request(tenant,session,'GET','/api/settings/chat/rooms'));
+ await assert.rejects(runtime.request(tenant,session,'POST','/api/settings/chat/rooms/other',{}));
+ });
+test('chat conflicts keep safe reconciliation guidance instead of the settings conflict message', async () => {
+ const runtime=new ClubRuntime(bindings,async()=>Response.json({chatReason:'reconciliation-required',message:'PRIVATE_SENTINEL'},{status:409}));
+ await assert.rejects(runtime.request(tenant,session,'POST','/api/settings/chat/rooms',{}),e=>e instanceof Error && /reconcil/i.test(e.message) && !/PRIVATE_SENTINEL|settings changed/i.test(e.message));
+});
+test('chat rate limits preserve bounded retry seconds without copying upstream messages', async () => {
+ const runtime=new ClubRuntime(bindings,async()=>Response.json({chatReason:'rate-limited',retryAfter:8,message:'PRIVATE_SENTINEL'},{status:429}));
+ await assert.rejects(runtime.request(tenant,session,'POST','/api/settings/chat/rooms',{}),e=>e instanceof Error && /8 seconds/.test(e.message) && !/PRIVATE_SENTINEL/.test(e.message));
+});
+test('team Matrix routes forward only fixed inventory, creation and mapping methods',async()=>{
+ const calls:string[]=[];const runtime=new ClubRuntime(bindings,async url=>{calls.push(String(url));return Response.json({ok:true});});
+ await runtime.request(tenant,session,'GET','/api/settings/chat/team-rooms');
+ await runtime.request(tenant,session,'POST','/api/settings/chat/team-rooms/11/create',{});
+ await runtime.request(tenant,session,'PUT','/api/settings/chat/team-rooms/11',{});
+ await assert.rejects(runtime.request(tenant,session,'DELETE','/api/settings/chat/team-rooms/11'));
+ await assert.rejects(runtime.request(tenant,session,'POST','/api/settings/chat/team-rooms/11',{}));
+ assert.equal(calls.length,3);
+});
